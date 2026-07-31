@@ -6,8 +6,19 @@ name: pr-merge-gate (git-ops-standards)
 # workflow file:
 #
 #   jobs:
-#     git-ops-standards:
+#     gate:
+#       permissions:
+#         contents: read
+#         pull-requests: read
 #       uses: SocioProphet/git-ops-standards/.github/workflows/pr-merge-gate.yml@main
+#
+# The caller-side `permissions:` block is NOT optional decoration -- a
+# reusable workflow can never be granted more than the calling job
+# explicitly passes. Omit it and GitHub rejects the call before it ever
+# queues (conclusion: startup_failure, zero jobs, no useful error message
+# in the API -- this took an isolation test against a trivial reusable
+# workflow to actually root-cause on 2026-07-31). Match this repo's
+# `permissions:` block above exactly.
 #
 # Then make it a required status check in branch protection. That's the
 # step that actually gives this teeth: a required check blocks the merge
