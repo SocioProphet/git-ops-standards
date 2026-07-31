@@ -1,0 +1,153 @@
+# Machine-checkable controls registry.
+#
+# Agent-agnostic on purpose: no Claude-specific syntax, no assumption about
+# which tool is reading this. Each control is (id, title, applies_to, check,
+# severity, remediation, incident). "check" is a human-readable description
+# of the detection logic, not executable code -- executable checks live in
+# scripts/estate_drift_audit.py and should implement these IDs by name.
+#
+# When you add a control, it must cite an incident (a real thing that went
+# wrong), or it doesn't belong here -- see README.md.
+
+controls:
+  - id: naming-canonical-bare-name
+    title: Repo directory name must be the bare repo name, no org prefix, no abbreviation
+    applies_to: local checkout directories
+    check: >
+      For each git repo directory, its basename equals the repo name from
+      its origin remote URL exactly (case-sensitive, hyphens preserved).
+      Flag anything matching `*__*` (org-prefix convention), anything with
+      a trailing ` 2`/`-main` (duplicate-download artifact), and anything
+      whose name doesn't appear in its own remote URL at all.
+    severity: low
+    remediation: Rename to the bare name; if a genuine name collision exists
+      across two different orgs, disambiguate explicitly and permanently.
+    incident: 2026-07-31-estate-cleanup
+
+  - id: naming-worktree-suffix
+    title: Linked worktrees must be named <repo>-<feature-slug>.wt
+    applies_to: git worktree directories
+    check: >
+      For each directory that is a linked worktree (git rev-parse
+      --git-common-dir differs from its own .git), its name starts with
+      the bare repo name and ends in `.wt`. Flag abbreviated prefixes
+      (e.g. `pp-*`) and prefix-instead-of-suffix conventions (`wt-*`).
+    severity: low
+    remediation: Rename via `git worktree move` (safe on an in-flight branch).
+    incident: 2026-07-31-estate-cleanup
+
+  - id: duplicate-remote-clones
+    title: No repo should have more than one local clone (worktrees excepted)
+    applies_to: all local checkouts
+    check: >
+      Group all local git directories by `git remote get-url origin`
+      (normalize case, since GitHub org/repo names are case-insensitive).
+      Any group with more than one member that are NOT linked worktrees of
+      each other is a violation.
+    severity: medium
+    remediation: >
+      Compare branch/dirty/sync state of each duplicate. Keep the most
+      current; before deleting the rest, verify (not assume) their unique
+      branches are merged or pushed (see capture-before-delete-verified).
+    incident: 2026-07-31-estate-cleanup
+
+  - id: capture-before-delete-verified
+    title: Never delete a branch/worktree/clone without verifying real upstream capture
+    applies_to: any deletion of git-tracked content
+    check: >
+      Before deletion, verify at least one of: (a) exact commit is an
+      ancestor of the target's current default branch (fetch first); (b)
+      branch is pushed AND referenced by an open or merged PR; (c) branch is
+      pushed with no PR (weakest acceptable bar -- confirm someone knows).
+      A plain "ahead/behind" count against a possibly-stale local
+      tracking ref is NOT sufficient evidence on its own.
+    severity: high
+    remediation: Push the branch/commit before deleting anything referencing it.
+    incident: 2026-07-31-estate-cleanup
+
+  - id: squash-merge-false-signal
+    title: Don't trust ahead/behind or ancestor checks alone under a squash-merge workflow
+    applies_to: repos using squash-merge (check org/repo settings or just observe PR history)
+    check: >
+      If a repo squash-merges PRs, a merged branch's local ref will
+      permanently show nonzero "ahead of upstream" and will permanently
+      fail an is-ancestor-of-main check, even though its content is fully
+      integrated. Cross-reference actual PR state
+      (`gh pr list --head <branch> --state all`) before treating either
+      signal as evidence of real drift.
+    severity: medium
+    remediation: n/a (detection-methodology control, not a fix-it control)
+    incident: 2026-07-31-estate-cleanup
+
+  - id: cross-repo-path-dependency-pinned
+    title: Local path dependencies on another repo must document which ref they need
+    applies_to: Cargo.toml path deps, sys.path inserts, npm file: deps, etc.
+    check: >
+      For each local path dependency crossing a repo boundary, a comment at
+      the declaration states which branch/commit the dependency needs (not
+      just "assume it's checked out"). If the needed content isn't on the
+      target's default branch, the dependency must name the branch/PR it
+      actually needs.
+    severity: high
+    remediation: >
+      Add the comment; if pointing at an unmerged branch, ensure a worktree
+      for that exact branch exists locally (recreate if deleted) and CI has
+      an equivalent explicit cross-repo checkout step.
+    incident: 2026-07-31-estate-cleanup
+
+  - id: ci-cross-repo-checkout-explicit
+    title: CI must explicitly check out any sibling repo a test/build needs
+    applies_to: CI workflow definitions
+    check: >
+      For any test that shells out to or imports from another repo's code
+      (not vendored, not a published package), the CI workflow has an
+      explicit second `actions/checkout` (or equivalent) step with a named
+      path, at the same relative location the code expects a local-dev
+      fallback to find it. A test that silently fail-closes in CI because
+      the dependency isn't there is a false-negative on the actual coverage
+      the test claims to provide.
+    severity: high
+    remediation: Add the checkout step; verify locally by simulating the
+      exact directory layout CI will produce before pushing.
+    incident: 2026-07-31-estate-cleanup
+
+  - id: pr-merge-gate
+    title: A PR must pass CI, have review comments addressed, and be freshly MERGEABLE before merging
+    applies_to: any PR about to be merged
+    check: >
+      (a) all required checks green or explained (transient/unrelated
+      flakes only); (b) every review comment (including inline, not just
+      top-level) addressed or explicitly dismissed with reasoning; (c) if no
+      automated reviewer exists on this repo, an adversarial self-review was
+      done; (d) `mergeable` state is MERGEABLE, checked fresh (not cached
+      from when the PR was opened).
+    severity: high
+    remediation: Fix failures, address comments, rebase if conflicting, re-check mergeable state.
+    incident: 2026-07-31-estate-cleanup
+
+  - id: worktree-definition-of-done
+    title: Every worktree has an owner, a target PR/branch, and no unpushed commits once "done"
+    applies_to: git worktree directories
+    check: >
+      For each worktree, its branch either has an open PR (Project still
+      active) or is merged with zero unpushed commits (Project done, safe
+      to remove). A worktree with neither -- unmerged, no open PR, no
+      recent activity -- is an unmanaged Project masquerading as an Area
+      problem.
+    severity: medium
+    remediation: Open a PR, or explicitly abandon (push first, then remove), or resume the work.
+    incident: 2026-07-31-estate-cleanup
+
+  - id: archive-retention-policy
+    title: Safety-net bundles and stale local branch refs must not accumulate indefinitely
+    applies_to: git bundle backup directories, stale local branch refs
+    check: >
+      Any `git bundle` safety-net snapshot older than one full audit cycle
+      with no open question it's insuring against should be deleted. Local
+      branch refs whose remote counterpart is gone (merged-then-deleted)
+      should be pruned on the same cadence.
+    severity: low
+    remediation: Delete bundles past their retention window; `git branch -d`
+      stale local refs after confirming (per capture-before-delete-verified)
+      the content is safe.
+    incident: 2026-07-31-estate-cleanup
