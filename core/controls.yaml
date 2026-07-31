@@ -8,6 +8,14 @@
 #
 # When you add a control, it must cite an incident (a real thing that went
 # wrong), or it doesn't belong here -- see README.md.
+#
+# version: bump on any control added/changed/removed. Consumers (memory
+# entries, per-repo CLAUDE.md pointers, deployed agents) record which
+# version they last synced against -- see bindings/*.md. Staleness itself
+# is a checkable condition (scripts/check_registry_staleness.py), not a
+# silent drift.
+
+version: "1.0.0"
 
 controls:
   - id: naming-canonical-bare-name
@@ -81,7 +89,7 @@ controls:
 
   - id: cross-repo-path-dependency-pinned
     title: Local path dependencies on another repo must document which ref they need
-    applies_to: Cargo.toml path deps, sys.path inserts, npm file: deps, etc.
+    applies_to: "Cargo.toml path deps, sys.path inserts, npm file: deps, etc."
     check: >
       For each local path dependency crossing a repo boundary, a comment at
       the declaration states which branch/commit the dependency needs (not

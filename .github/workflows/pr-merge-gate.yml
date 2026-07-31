@@ -1,0 +1,52 @@
+name: pr-merge-gate (git-ops-standards)
+
+# Reusable workflow implementing the automatable part of controls.yaml's
+# pr-merge-gate and cross-repo-path-dependency-pinned as an actual BLOCKING
+# check, not a report. Any repo in the estate calls this from its own
+# workflow file:
+#
+#   jobs:
+#     git-ops-standards:
+#       uses: SocioProphet/git-ops-standards/.github/workflows/pr-merge-gate.yml@main
+#
+# Then make it a required status check in branch protection. That's the
+# step that actually gives this teeth: a required check blocks the merge
+# button regardless of who -- or what -- authored the PR.
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out git-ops-standards (for the check scripts themselves)
+        uses: actions/checkout@v4
+        with:
+          repository: SocioProphet/git-ops-standards
+          path: _git-ops-standards
+
+      - name: Check unpinned cross-repo path dependencies in this PR's diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 _git-ops-standards/scripts/check_path_dependency_pins.py \
+            --base "${BASE_SHA:-HEAD~1}" --head "${HEAD_SHA:-HEAD}"
+
+      - name: Check PR is mergeable and has no unresolved review threads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 _git-ops-standards/scripts/check_pr_merge_readiness.py \
+            --repo "$REPO" --pr "$PR_NUMBER"
