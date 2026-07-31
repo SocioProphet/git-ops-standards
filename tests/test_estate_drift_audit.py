@@ -34,6 +34,11 @@ AUDIT_SCRIPT = HERE.parent / "scripts" / "estate_drift_audit.py"
 
 def make_bare_repo(path: Path) -> None:
     subprocess.run(["git", "init", "--quiet", str(path)], check=True)
+    # Local (not --global) identity: a fresh CI runner has no global git
+    # user.name/user.email configured, unlike a developer's own machine.
+    # This was caught by the real CI run, not assumed -- see commit history.
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
     subprocess.run(["git", "-C", str(path), "commit", "--allow-empty", "-q", "-m", "init"], check=True)
 
 
