@@ -80,20 +80,42 @@ reports drift, it doesn't block anything. `tests/test_estate_drift_audit.py`
 proves it fires on real violations and stays quiet on a clean tree --
 re-run that after any change to the audit script's logic, not just once.
 
-## 5. CI gate (cross-repo, preventive, agent-agnostic)
+## 5. CI gate (cross-repo, preventive, agent-agnostic) -- LIVE, required, as of 2026-08-01
 
 `.github/workflows/pr-merge-gate.yml` is a reusable workflow. Any repo in
-the estate adopts it by adding to its own workflow file:
+the estate adopts it by adding to its own workflow file (the caller-side
+`permissions:` block below is not optional -- see the reusable workflow's
+own header comment for why):
 
 ```yaml
 jobs:
-  git-ops-standards:
+  gate:
+    permissions:
+      contents: read
+      pull-requests: read
     uses: SocioProphet/git-ops-standards/.github/workflows/pr-merge-gate.yml@main
 ```
 
-and then marking that check as **required** in branch protection. That
-last step is what actually gives it teeth across the estate: a required
-check blocks the merge button regardless of who -- or what -- authored the
-PR, independent of any one Claude Code session's discipline. Not yet
-adopted by any repo as of v1.0.0 -- this binding documents how to, it
-doesn't claim it's rolled out everywhere.
+and then marking the resulting `gate / check` context as **required** in
+branch protection. That last step is what actually gives it teeth across
+the estate: a required check blocks the merge button regardless of who --
+or what -- authored the PR, independent of any one Claude Code session's
+discipline.
+
+As of 2026-08-01: adopted in 7 repos (sociosphere, prophet-platform,
+ontogenesis, socioprophet, prophet-workspace, socioprophet-docs,
+sourceos-continuum). `gate / check` is a **required** status check on
+`main`/`master` in the first 6 (all under the SocioProphet org) --
+`gh api repos/{owner}/{repo}/branches/{branch}/protection` is the source
+of truth, don't assume this list stays current without checking it.
+**sourceos-continuum is the one exception, left advisory-only on purpose**:
+SourceOS-Linux (a different GitHub org from SocioProphet) cannot resolve
+this cross-org public reusable workflow at all -- confirmed org-wide via a
+second-repo isolation test, every org/repo Actions-permissions API setting
+already correctly configured, root cause still unresolved (needs the
+GitHub web UI or a support ticket, outside what this environment's API
+access can fix). Making the check required there right now would
+permanently block every future PR on that repo behind a check that can
+never run. Revisit once that platform issue is fixed -- don't just copy
+this repo's exception forward without re-checking whether it still
+applies.
