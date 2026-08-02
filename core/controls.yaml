@@ -223,8 +223,14 @@ controls:
       SCM/registry (gitea, zot) creds live only in-cluster and are reached
       this way; this narrows socioprophet-agent-standards
       004-workload-and-service-identity-standard.md to the SCM/CI case.
+      Corollary (enforced by CodeQL py/clear-text-logging-sensitive-data as a
+      required check): tooling that DETECTS secret usage must not itself echo
+      the matched secret reference into its output or logs -- report the file
+      and rule, never the token.
     severity: high
     remediation: Replace the PAT with WIF or a minted App token; replace
       `credentials_json` with `workload_identity_provider`. Rotate the leaked
       static credential. Never handle the value on a laptop or in a terminal.
+      A scanner for this control must emit the finding's location, not the
+      secret reference it matched.
     incident: 2026-08-02-silent-ci-failures
