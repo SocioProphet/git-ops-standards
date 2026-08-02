@@ -38,9 +38,15 @@ permissions:
 jobs:
   contribute:
     uses: SocioProphet/git-ops-standards/.github/workflows/catalog-contribute.yml@main
-    # Forwards the SHARED ops-App org secrets (GH_OPS_APP_ID /
-    # GH_OPS_APP_PRIVATE_KEY) the reusable workflow mints the catalog token from.
-    # These org secrets already exist; `inherit` creates no new secret. The
-    # reusable workflow declares no named secret inputs, so `inherit` (not an
-    # explicit map) is what makes the org secrets visible to it.
-    secrets: inherit
+    # The reusable workflow mints the catalog token in CI from the SHARED ops-App
+    # org secrets (GH_OPS_APP_ID / GH_OPS_APP_PRIVATE_KEY). These already exist;
+    # you create no new secret. Two ways to pass them:
+    #
+    #   RECOMMENDED — map ONLY the two the workflow needs (least exposure):
+    secrets:
+      GH_OPS_APP_ID: ${{ secrets.GH_OPS_APP_ID }}
+      GH_OPS_APP_PRIVATE_KEY: ${{ secrets.GH_OPS_APP_PRIVATE_KEY }}
+    #
+    #   Or, if you prefer, `secrets: inherit` (forwards ALL your secrets — simpler
+    #   but broader). Replace the `secrets:` block above with a single line:
+    #     secrets: inherit

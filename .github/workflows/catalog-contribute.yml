@@ -31,10 +31,11 @@ name: catalog-contribute
 # nowhere else. The token expires when the job ends; the private key is never
 # echoed and the token is never hard-coded.
 #
-# Callers forward the shared org secrets with `secrets: inherit` (see
-# templates/catalog.yml). Because these are ORG secrets already provisioned for
-# the ops App, `inherit` sets no new secret — it just makes the existing ones
-# visible to this called workflow.
+# The two App secrets are DECLARED named inputs below (both required: false), so
+# a caller can map ONLY those two (least exposure, recommended) or fall back to
+# `secrets: inherit` — either way these are ORG secrets already provisioned for
+# the ops App, so passing them sets no new secret; it just makes the existing
+# ones visible to this called workflow. See templates/catalog.yml.
 #
 # INERT until the shared App is configured: if vars.GH_OPS_APP_CONFIGURED != true
 # (or the secrets are absent) the job no-ops and exits 0 — exactly like
@@ -64,9 +65,24 @@ on:
           e.g. "regex-operational-dataset:extract_regex". Defaults to regex only.
         type: string
         default: "regex-operational-dataset:extract_regex"
-    # No `secrets:` block: the credential is MINTED in CI from the estate's shared
-    # ops-App org secrets (forwarded by the caller via `secrets: inherit`), never
-    # passed in as a pre-made token. See the header note.
+    secrets:
+      # Named so the reusable-workflow interface is EXPLICIT: a caller can map
+      # ONLY these two (least exposure) instead of `secrets: inherit`-ing every
+      # secret it holds. Both required: false so `secrets: inherit` still works
+      # and, when they are absent, the inert-guard trips (job no-ops, exits 0).
+      # The credential is still MINTED in CI from these org secrets — never a
+      # pre-made token passed in. See the header note.
+      GH_OPS_APP_ID:
+        description: >-
+          Numeric id of the estate's shared ops GitHub App (same one board-parity
+          / estate-ci-health mint from). Used to MINT a short-lived, catalog-scoped
+          installation token in CI.
+        required: false
+      GH_OPS_APP_PRIVATE_KEY:
+        description: >-
+          PEM private key of the shared ops App. Used to MINT the token in CI.
+          Never a PAT, never echoed.
+        required: false
 
 # Least privilege, matching this repo's reusable-workflow convention
 # (.github/workflows/pr-merge-gate.yml). The cross-repo write is done with the
