@@ -61,3 +61,30 @@ those produced noise on repos where cancellation is routine (a newer push
 superseding an in-flight run) or where CI legitimately only runs on release
 events. A checker that cries wolf gets ignored, which is worse than no
 checker (see `feedback_self_validating_checker.md`'s sibling principle).
+
+## Credential + branch-ref dimension (same root cause, added 2026-08-02)
+
+Building the estate-wide parity/cutover work (GitHub ⇄ sovereign gitea/zot)
+surfaced two more faces of "the watching isn't where it can be watched," and
+two controls were authored against this incident:
+
+- **Operational automation stranded on a feature branch.** `estate-ci-health`
+  can only observe the *default* branch. A scheduled/deploy/mirror/reconcile
+  workflow that lives on a feature branch therefore both (a) never fires —
+  GitHub only runs `schedule`/`workflow_dispatch` from the default branch —
+  and (b) is invisible to the health check even when it is broken. The same
+  disease that hid `prophet-platform`'s never-reconciled Rollouts/Cilium
+  manifest. Rule: operational workflows run from the default branch, never a
+  feature branch (`ops-workflows-run-from-default-branch`). This is scoped to
+  *operational* runs only — code still lands via feature branch → PR → main.
+
+- **Credentials that can't be minted where the work runs.** The sovereign
+  gitea/zot credentials are not held by any human and are classifier-blocked
+  from a laptop by design; they are reached only from CI via Workload
+  Identity Federation into the cluster (the pattern `provision-secrets.yml`
+  already uses). A static PAT in a GitHub secret both under-covers (it can't
+  see private repos the way a minted GitHub App token can — the reason
+  `estate-ci-health` needs `GH_OPS_APP_ID`/`GH_OPS_APP_PRIVATE_KEY`) and is a
+  standing exfiltration risk. Rule: CI credentials are minted in-workflow
+  (WIF / short-lived App token / in-cluster Job), never a static PAT or a
+  laptop-held secret (`ci-secrets-minted-never-static-pat`).
