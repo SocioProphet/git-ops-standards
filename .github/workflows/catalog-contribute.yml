@@ -10,14 +10,34 @@ name: catalog-contribute
 # the caller, and opens/updates a PR to the catalog writing
 # datasets/<ds>/contributions/<caller-repo>.jsonl.
 #
-# Cross-repo writes use a MINTED GitHub App / org installation token passed as the
-# `catalog_token` secret (NEVER a hard-coded PAT — estate policy: secrets minted
-# in CI). Until that secret is set, the job is INERT: it detects the empty token
-# and exits 0 without touching anything.
+# Secret -> input mapping (callers MUST wire this): the caller's org/repo secret
+# `CATALOG_CONTRIB_TOKEN` is passed into this workflow as the `catalog_token`
+# secret input, e.g.
+#
+#   jobs:
+#     contribute:
+#       permissions:
+#         contents: read
+#       uses: SocioProphet/git-ops-standards/.github/workflows/catalog-contribute.yml@main
+#       secrets:
+#         catalog_token: ${{ secrets.CATALOG_CONTRIB_TOKEN }}
+#
+# `catalog_token` must be a MINTED GitHub App / org installation token (NEVER a
+# hard-coded PAT -- estate policy: secrets minted in CI) with contents+pull_requests
+# write on the catalog repo. The cross-repo write uses THIS token, not the
+# workflow's own GITHUB_TOKEN -- so the top-level `permissions:` below only needs
+# `contents: read` (to check out the caller). Until the secret is set the input
+# resolves empty and the job is INERT: it exits 0 without touching anything.
 
 on:
   workflow_call:
     inputs:
+      repo_name:
+        description: >-
+          Caller repo short name for the shard path / sources[].repo. Leave unset
+          to derive it reliably from GITHUB_REPOSITORY (owner stripped).
+        type: string
+        default: ""
       catalog_repo:
         description: "owner/name of the catalog repo to contribute to."
         type: string
@@ -34,20 +54,44 @@ on:
         default: "regex-operational-dataset:extract_regex"
     secrets:
       catalog_token:
-        description: "Minted GitHub App/org token with contents+pull_requests write on the catalog repo."
+        description: "Minted GitHub App/org token (contents+pull_requests write on the catalog repo). Callers pass secrets.CATALOG_CONTRIB_TOKEN here."
         required: true
+
+# Least privilege, matching this repo's reusable-workflow convention
+# (.github/workflows/pr-merge-gate.yml). The cross-repo write is done with
+# `catalog_token`, so the built-in GITHUB_TOKEN only needs read to check out.
+permissions:
+  contents: read
 
 jobs:
   contribute:
     runs-on: ubuntu-latest
     steps:
-      - name: Guard — inert until the catalog token is set
+      - name: Resolve caller repo name + inert-token guard
         id: guard
         env:
           CATALOG_TOKEN: ${{ secrets.catalog_token }}
+          INPUT_REPO_NAME: ${{ inputs.repo_name }}
         run: |
+          set -euo pipefail
+          # Reliable caller repo name: prefer the explicit input, else strip the
+          # owner from GITHUB_REPOSITORY (always populated). github.event.repository
+          # .name is NOT reliably present under workflow_call, so never use it for
+          # the shard path -- an empty name would write ".jsonl". Fail fast instead.
+          name="${INPUT_REPO_NAME}"
+          if [ -z "${name}" ]; then
+            name="${GITHUB_REPOSITORY#*/}"
+          fi
+          if [ -z "${name}" ]; then
+            echo "::error::could not resolve caller repo name (inputs.repo_name empty and GITHUB_REPOSITORY unset)"
+            exit 1
+          fi
+          echo "repo_name=${name}" >> "$GITHUB_OUTPUT"
+          echo "resolved caller repo name: ${name}"
+          # Inert until the token is wired. The message names the INPUT so callers
+          # know which knob is missing (they map CATALOG_CONTRIB_TOKEN -> catalog_token).
           if [ -z "${CATALOG_TOKEN}" ]; then
-            echo "CATALOG_CONTRIB_TOKEN is not set — this contributor is INERT (no-op). Exiting 0."
+            echo "secrets.catalog_token (mapped from the caller's CATALOG_CONTRIB_TOKEN) is not set -- this contributor is INERT (no-op). Exiting 0."
             echo "active=false" >> "$GITHUB_OUTPUT"
           else
             echo "active=true" >> "$GITHUB_OUTPUT"
@@ -76,7 +120,7 @@ jobs:
       - name: Run extractors scoped to the caller repo
         if: steps.guard.outputs.active == 'true'
         env:
-          CALLER_REPO: ${{ github.event.repository.name }}
+          CALLER_REPO: ${{ steps.guard.outputs.repo_name }}
           DATASETS: ${{ inputs.datasets }}
         run: |
           set -euo pipefail
@@ -93,7 +137,7 @@ jobs:
         if: steps.guard.outputs.active == 'true'
         env:
           GH_TOKEN: ${{ secrets.catalog_token }}
-          CALLER_REPO: ${{ github.event.repository.name }}
+          CALLER_REPO: ${{ steps.guard.outputs.repo_name }}
           CATALOG_REPO: ${{ inputs.catalog_repo }}
         working-directory: catalog
         run: |

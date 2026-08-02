@@ -15,6 +15,12 @@
 # whitespace/comma-separated <dataset>:<extractor> pairs, e.g.
 #   with:
 #     datasets: "regex-operational-dataset:extract_regex ci-workflows-tests:extract_ci_workflows_tests"
+#
+# SUPPLY CHAIN: this template pins `uses:` to @main for readability, but a real
+# consumer SHOULD pin to an immutable commit SHA of git-ops-standards with a
+# trailing `# <branch/tag>` comment, e.g.
+#   uses: SocioProphet/git-ops-standards/.github/workflows/catalog-contribute.yml@<40-char-sha>  # main
+# so a mutable branch can't silently change what runs in your repo.
 
 name: catalog-contribute
 
