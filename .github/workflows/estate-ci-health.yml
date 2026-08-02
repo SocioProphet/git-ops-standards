@@ -57,7 +57,18 @@ jobs:
           # exist -- it just won't be able to see OTHER repos in that case.
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
         run: |
-          python3 scripts/estate_ci_health_audit.py --org SocioProphet --json > /tmp/audit.json
+          # `|| true` on the first line is load-bearing, not decoration: this
+          # script legitimately exits 1 when it finds a real failure -- that's
+          # the whole point -- but this step runs under bash -e (GitHub
+          # Actions' default), so without `|| true` that expected non-zero
+          # exit would abort the rest of THIS block immediately, hiding the
+          # JSON/summary output that explains WHY, and leaving the job red
+          # with zero visible reason. Caught by actually triggering this
+          # workflow manually on 2026-08-02 and finding exactly that: a real
+          # finding, an opaque failure, nothing printed. The final `sys.exit`
+          # below is what actually decides this job's pass/fail, deliberately
+          # placed after the output is guaranteed to have been printed.
+          python3 scripts/estate_ci_health_audit.py --org SocioProphet --json > /tmp/audit.json || true
           cat /tmp/audit.json
           python3 -c "
           import json, sys
