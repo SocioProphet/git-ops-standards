@@ -1,0 +1,68 @@
+name: estate-ci-health
+
+# Scheduled, org-wide scan implementing core/controls.yaml's
+# github-ci-health-current. See estate/incident-log/2026-08-02-silent-ci-failures.md
+# for why this exists: holmes and prophet-mesh both sat with red `main` CI
+# for days/weeks, found only by accident.
+#
+# REQUIRES ONE-TIME SETUP before the schedule trigger will actually work:
+# the default GITHUB_TOKEN is scoped to THIS repo only and cannot read
+# Actions runs or repo metadata across the rest of the org. This workflow
+# mints a short-lived installation token from a GitHub App instead (per this
+# estate's own rule: secrets minted in CI, never static PATs) -- but that
+# requires an App already installed org-wide with `contents: read` +
+# `metadata: read` (the org already has one such App, "claude", app_id
+# 1236702, installed with repository_selection: all -- reuse its
+# credentials if available, or install a new minimal-read-only App).
+# Add its App ID and private key as this repo's secrets:
+#   GH_OPS_APP_ID           -- the App's numeric ID
+#   GH_OPS_APP_PRIVATE_KEY  -- the App's PEM private key
+# Until those secrets exist, `workflow_dispatch` (manual run) still works
+# for anyone with their own `gh` session with org read access -- the audit
+# script itself has no dependency on this token-minting step, only the
+# unattended schedule does.
+
+on:
+  schedule:
+    - cron: "17 13 * * *"  # daily, off-the-hour to avoid GitHub's top-of-hour scheduling pileup
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Mint an org-scoped token (skipped if secrets aren't configured yet)
+        id: app-token
+        if: ${{ vars.GH_OPS_APP_CONFIGURED == 'true' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_OPS_APP_ID }}
+          private-key: ${{ secrets.GH_OPS_APP_PRIVATE_KEY }}
+          owner: SocioProphet
+
+      - name: Run the estate-wide CI health audit
+        env:
+          # Falls back to this job's own (repo-scoped) token so a manual
+          # workflow_dispatch or a contributor's local `gh auth` still works
+          # for testing the script itself, even before org-wide secrets
+          # exist -- it just won't be able to see OTHER repos in that case.
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+        run: |
+          python3 scripts/estate_ci_health_audit.py --org SocioProphet --json > /tmp/audit.json
+          cat /tmp/audit.json
+          python3 -c "
+          import json, sys
+          data = json.load(open('/tmp/audit.json'))
+          hard = [f for f in data['findings'] if f['severity'] == 'high']
+          print(f\"\n{len(hard)} repo(s) with failing default-branch CI out of {data['scanned']} scanned.\")
+          sys.exit(1 if hard else 0)
+          "

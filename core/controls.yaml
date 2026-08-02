@@ -15,7 +15,7 @@
 # is a checkable condition (scripts/check_registry_staleness.py), not a
 # silent drift.
 
-version: "1.0.0"
+version: "1.1.0"
 
 controls:
   - id: naming-canonical-bare-name
@@ -159,3 +159,23 @@ controls:
       stale local refs after confirming (per capture-before-delete-verified)
       the content is safe.
     incident: 2026-07-31-estate-cleanup
+
+  - id: github-ci-health-current
+    title: Every first-party estate repo's default branch must have passing CI
+    applies_to: all non-fork, non-archived repos in the org
+    check: >
+      For each repo, its latest GitHub Actions run on the default branch
+      resolves to `success`, not `failure`. Vendored/forked repos are
+      excluded (isFork=true) -- CI health on upstream code we don't
+      maintain isn't this estate's responsibility. `cancelled` conclusions
+      and repos with zero CI runs at all are reported as lower-confidence
+      notes, not hard findings -- both have legitimate benign causes
+      (a superseding push; a release-only workflow trigger) and treating
+      them as failures produces noise that gets ignored.
+    severity: high
+    remediation: Investigate the actual failing step against the real CI
+      runner's OS/architecture (do not assume a local reproduction on a
+      different platform explains a Linux Actions runner's failure --
+      verify in a matching container). Fix the root cause; don't silence
+      the check.
+    incident: 2026-08-02-silent-ci-failures
