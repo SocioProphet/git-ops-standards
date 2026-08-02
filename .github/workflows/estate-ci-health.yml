@@ -17,10 +17,14 @@ name: estate-ci-health
 # Add its App ID and private key as this repo's secrets:
 #   GH_OPS_APP_ID           -- the App's numeric ID
 #   GH_OPS_APP_PRIVATE_KEY  -- the App's PEM private key
-# Until those secrets exist, `workflow_dispatch` (manual run) still works
-# for anyone with their own `gh` session with org read access -- the audit
-# script itself has no dependency on this token-minting step, only the
-# unattended schedule does.
+# CONFIRMED WORKING TODAY WITHOUT THE APP TOKEN (2026-08-02): a real
+# scheduled-equivalent run using only the default, repo-scoped GITHUB_TOKEN
+# successfully scanned 107 of the 115 first-party repos and correctly found
+# the one real failure present at the time. The ~8 missing are almost
+# certainly private repos, invisible to a token scoped to this single
+# (presumably public) repo -- public-repo coverage does NOT require the App
+# token at all, contrary to this file's original assumption. The App token
+# is only needed to extend coverage to private repos.
 
 on:
   schedule:
