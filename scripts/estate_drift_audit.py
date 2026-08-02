@@ -227,7 +227,11 @@ def check_ops_workflows_default_branch(repos: list[Path]) -> list[dict]:
                 findings.append({
                     "control": "ops-workflows-run-from-default-branch",
                     "path": str(wf),
-                    "detail": f"scheduled workflow pins non-default checkout ref '{ref}' -- schedules only fire from the default branch",
+                    # Do not echo the ref value read from the workflow file: keep
+                    # all file-derived content out of the tool's output (same
+                    # discipline as the secrets check; also clears the CodeQL
+                    # clear-text-logging data-flow at the json.dumps sink).
+                    "detail": "scheduled workflow pins a non-default checkout ref -- schedules only fire from the default branch",
                 })
                 break
     return findings
