@@ -1,0 +1,163 @@
+name: catalog-contribute
+
+# Reusable workflow: a caller repo runs this on merge to main to refresh ITS OWN
+# contribution shard in the data catalog (SocioProphet/prophet-core-catalog),
+# implementing Lord Michael's "each repo updates its contribution on merge to
+# main" directive.
+#
+# It checks out the caller repo, fetches extractors/ from the catalog repo
+# (pinned by ref = single source of truth for extraction), runs them scoped to
+# the caller, and opens/updates a PR to the catalog writing
+# datasets/<ds>/contributions/<caller-repo>.jsonl.
+#
+# Secret -> input mapping (callers MUST wire this): the caller's org/repo secret
+# `CATALOG_CONTRIB_TOKEN` is passed into this workflow as the `catalog_token`
+# secret input, e.g.
+#
+#   jobs:
+#     contribute:
+#       permissions:
+#         contents: read
+#       uses: SocioProphet/git-ops-standards/.github/workflows/catalog-contribute.yml@main
+#       secrets:
+#         catalog_token: ${{ secrets.CATALOG_CONTRIB_TOKEN }}
+#
+# `catalog_token` must be a MINTED GitHub App / org installation token (NEVER a
+# hard-coded PAT -- estate policy: secrets minted in CI) with contents+pull_requests
+# write on the catalog repo. The cross-repo write uses THIS token, not the
+# workflow's own GITHUB_TOKEN -- so the top-level `permissions:` below only needs
+# `contents: read` (to check out the caller). Until the secret is set the input
+# resolves empty and the job is INERT: it exits 0 without touching anything.
+
+on:
+  workflow_call:
+    inputs:
+      repo_name:
+        description: >-
+          Caller repo short name for the shard path / sources[].repo. Leave unset
+          to derive it reliably from GITHUB_REPOSITORY (owner stripped).
+        type: string
+        default: ""
+      catalog_repo:
+        description: "owner/name of the catalog repo to contribute to."
+        type: string
+        default: "SocioProphet/prophet-core-catalog"
+      extractors_ref:
+        description: "git ref of the catalog repo to fetch extractors/ from (pin for reproducibility)."
+        type: string
+        default: "main"
+      datasets:
+        description: >-
+          Whitespace/comma-separated <dataset>:<extractor-module> pairs to run,
+          e.g. "regex-operational-dataset:extract_regex". Defaults to regex only.
+        type: string
+        default: "regex-operational-dataset:extract_regex"
+    secrets:
+      catalog_token:
+        description: "Minted GitHub App/org token (contents+pull_requests write on the catalog repo). Callers pass secrets.CATALOG_CONTRIB_TOKEN here."
+        required: true
+
+# Least privilege, matching this repo's reusable-workflow convention
+# (.github/workflows/pr-merge-gate.yml). The cross-repo write is done with
+# `catalog_token`, so the built-in GITHUB_TOKEN only needs read to check out.
+permissions:
+  contents: read
+
+jobs:
+  contribute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve caller repo name + inert-token guard
+        id: guard
+        env:
+          CATALOG_TOKEN: ${{ secrets.catalog_token }}
+          INPUT_REPO_NAME: ${{ inputs.repo_name }}
+        run: |
+          set -euo pipefail
+          # Reliable caller repo name: prefer the explicit input, else strip the
+          # owner from GITHUB_REPOSITORY (always populated). github.event.repository
+          # .name is NOT reliably present under workflow_call, so never use it for
+          # the shard path -- an empty name would write ".jsonl". Fail fast instead.
+          name="${INPUT_REPO_NAME}"
+          if [ -z "${name}" ]; then
+            name="${GITHUB_REPOSITORY#*/}"
+          fi
+          if [ -z "${name}" ]; then
+            echo "::error::could not resolve caller repo name (inputs.repo_name empty and GITHUB_REPOSITORY unset)"
+            exit 1
+          fi
+          echo "repo_name=${name}" >> "$GITHUB_OUTPUT"
+          echo "resolved caller repo name: ${name}"
+          # Inert until the token is wired. The message names the INPUT so callers
+          # know which knob is missing (they map CATALOG_CONTRIB_TOKEN -> catalog_token).
+          if [ -z "${CATALOG_TOKEN}" ]; then
+            echo "secrets.catalog_token (mapped from the caller's CATALOG_CONTRIB_TOKEN) is not set -- this contributor is INERT (no-op). Exiting 0."
+            echo "active=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout caller repo (read-only scan target)
+        if: steps.guard.outputs.active == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: caller
+
+      - name: Checkout catalog repo (extractors + write target)
+        if: steps.guard.outputs.active == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.catalog_repo }}
+          ref: ${{ inputs.extractors_ref }}
+          token: ${{ secrets.catalog_token }}
+          path: catalog
+
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.active == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Run extractors scoped to the caller repo
+        if: steps.guard.outputs.active == 'true'
+        env:
+          CALLER_REPO: ${{ steps.guard.outputs.repo_name }}
+          DATASETS: ${{ inputs.datasets }}
+        run: |
+          set -euo pipefail
+          for pair in $(echo "${DATASETS}" | tr ',' ' '); do
+            ds="${pair%%:*}"
+            mod="${pair##*:}"
+            out="catalog/datasets/${ds}/contributions/${CALLER_REPO}.jsonl"
+            mkdir -p "catalog/datasets/${ds}/contributions"
+            echo "extracting ${mod} -> ${out}"
+            python3 "catalog/extractors/${mod}.py" caller "${CALLER_REPO}" --out "${out}"
+          done
+
+      - name: Open/update the catalog contribution PR
+        if: steps.guard.outputs.active == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.catalog_token }}
+          CALLER_REPO: ${{ steps.guard.outputs.repo_name }}
+          CATALOG_REPO: ${{ inputs.catalog_repo }}
+        working-directory: catalog
+        run: |
+          set -euo pipefail
+          branch="catalog/contrib-${CALLER_REPO}"
+          git config user.name  "catalog-contributor[bot]"
+          git config user.email "catalog-contributor[bot]@users.noreply.github.com"
+          git checkout -B "${branch}"
+          git add datasets/*/contributions/${CALLER_REPO}.jsonl 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "no shard changes for ${CALLER_REPO} — nothing to contribute (idempotent no-op)."
+            exit 0
+          fi
+          git commit -m "chore(catalog): refresh ${CALLER_REPO} contribution shard(s)"
+          git push --force-with-lease origin "${branch}"
+          if [ -z "$(gh pr list --repo "${CATALOG_REPO}" --head "${branch}" --state open --json number -q '.[].number')" ]; then
+            gh pr create --repo "${CATALOG_REPO}" \
+              --base main --head "${branch}" \
+              --title "chore(catalog): ${CALLER_REPO} contribution shard" \
+              --body "Automated per-repo catalog contribution from \`${CALLER_REPO}\` on merge to main (Lord Michael's 'each repo updates its contribution' directive). Regenerated by the git-ops-standards reusable workflow; merging triggers assemble-catalog.yml."
+          else
+            echo "PR already open for ${branch} — push updated it."
+          fi
