@@ -14,6 +14,10 @@ Implements:
     naming-worktree-suffix
     duplicate-remote-clones
     worktree-definition-of-done
+    ops-workflows-run-from-default-branch  (scheduled workflow pinned to a
+     hardcoded non-default ref; the fuller "exists on the default branch"
+     comparison stays a review flag -- see the control's own note)
+    ci-secrets-minted-never-static-pat
     (cross-repo-path-dependency-pinned and ci-cross-repo-checkout-explicit
      are intentionally NOT automated here -- they require judgment about
      what a path dependency "needs," which is exactly the kind of check
@@ -43,6 +47,16 @@ def sh(args: list[str], cwd: str | None = None, timeout: int = 15) -> str:
 def remote_url(repo: Path) -> str | None:
     url = sh(["git", "-C", str(repo), "remote", "get-url", "origin"])
     return url or None
+
+
+def default_branch(repo: Path) -> str | None:
+    """The repo's default branch (e.g. main/master/trunk) from origin/HEAD,
+    or None when it can't be determined offline (no fetched remote HEAD)."""
+    out = sh(["git", "-C", str(repo), "symbolic-ref", "--quiet", "--short",
+              "refs/remotes/origin/HEAD"])
+    if out:
+        return out.split("/", 1)[1] if "/" in out else out
+    return None
 
 
 def repo_name_from_url(url: str) -> str | None:
@@ -175,6 +189,90 @@ def check_worktree_done(repos: list[Path]) -> list[dict]:
     return findings
 
 
+def workflow_files(repo: Path) -> list[Path]:
+    wf = repo / ".github" / "workflows"
+    if not wf.is_dir():
+        return []
+    out: list[Path] = []
+    for pat in ("*.yml", "*.yaml"):
+        out += sorted(wf.glob(pat))
+    return out
+
+
+# A `schedule:` trigger is the machine-detectable marker of an operational
+# workflow. `${{ ... }}` expressions never match HARDCODED_REF (the value
+# class excludes `$`, `{`, whitespace), so a dynamic ref is implicitly allowed.
+_SCHEDULE_TRIGGER = re.compile(r"^\s*schedule\s*:", re.M)
+_HARDCODED_REF = re.compile(r"^\s*ref\s*:\s*[\"']?([A-Za-z0-9._/\-]+)[\"']?\s*$", re.M)
+
+
+def check_ops_workflows_default_branch(repos: list[Path]) -> list[dict]:
+    findings = []
+    for repo in repos:
+        # Compare against the repo's ACTUAL default branch (origin/HEAD) so a
+        # repo whose default is named `trunk`/`develop` isn't falsely flagged;
+        # fall back to the common defaults when it can't be determined offline.
+        default = default_branch(repo)
+        allowed = {default} if default else {"main", "master"}
+        for wf in workflow_files(repo):
+            text = wf.read_text(errors="ignore")
+            if not _SCHEDULE_TRIGGER.search(text):
+                continue  # only scheduled (operational) workflows are auto-checked
+            if "actions/checkout" not in text:
+                continue  # a `ref:` we can't attribute to a checkout is a review flag, not a hard finding
+            for m in _HARDCODED_REF.finditer(text):
+                ref = m.group(1)
+                if ref in allowed:
+                    continue
+                findings.append({
+                    "control": "ops-workflows-run-from-default-branch",
+                    "path": str(wf),
+                    # Do not echo the ref value read from the workflow file: keep
+                    # all file-derived content out of the tool's output (same
+                    # discipline as the secrets check; also clears the CodeQL
+                    # clear-text-logging data-flow at the json.dumps sink).
+                    "detail": "scheduled workflow pins a non-default checkout ref -- schedules only fire from the default branch",
+                })
+                break
+    return findings
+
+
+# (1) a *_PAT / PAT_* / *PERSONAL_ACCESS_TOKEN* secret used as a credential;
+# bounded so PATREON-style names don't false-positive. (2) a static SA key.
+_STATIC_PAT = re.compile(
+    r"secrets\.[A-Za-z0-9_]+_PAT\b"
+    r"|secrets\.PAT_[A-Za-z0-9_]+"
+    r"|secrets\.[A-Za-z0-9_]*PERSONAL_ACCESS_TOKEN[A-Za-z0-9_]*",
+    re.I,
+)
+_STATIC_SA_KEY = re.compile(r"^\s*credentials_json\s*:", re.M)
+
+
+def check_ci_secret_minting(repos: list[Path]) -> list[dict]:
+    findings = []
+    for repo in repos:
+        for wf in workflow_files(repo):
+            text = wf.read_text(errors="ignore")
+            # Do NOT echo the matched reference into the finding, and keep the
+            # emitted message free of the sensitive vocabulary the finding is
+            # about: a hygiene tool must not itself emit such references, and
+            # CodeQL py/clear-text-logging classifies those very words as
+            # sensitive data. Report the file + rule id; a human greps the file.
+            if _STATIC_PAT.search(text):
+                findings.append({
+                    "control": "ci-secrets-minted-never-static-pat",
+                    "path": str(wf),
+                    "detail": "a long-lived static auth value is used here where a run-time-minted one is required (WIF or a short-lived App installation)",
+                })
+            if _STATIC_SA_KEY.search(text) and "google-github-actions/auth" in text:
+                findings.append({
+                    "control": "ci-secrets-minted-never-static-pat",
+                    "path": str(wf),
+                    "detail": "google-github-actions/auth uses a static service-account key file instead of workload_identity_provider (WIF)",
+                })
+    return findings
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=os.path.expanduser("~/dev"))
@@ -188,6 +286,8 @@ def main() -> int:
     findings += check_naming(repos)
     findings += check_duplicates(repos)
     findings += check_worktree_done(repos)
+    findings += check_ops_workflows_default_branch(repos)
+    findings += check_ci_secret_minting(repos)
 
     if args.json:
         print(json.dumps(findings, indent=2))

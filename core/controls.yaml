@@ -15,7 +15,7 @@
 # is a checkable condition (scripts/check_registry_staleness.py), not a
 # silent drift.
 
-version: "1.1.0"
+version: "1.2.0"
 
 controls:
   - id: naming-canonical-bare-name
@@ -178,4 +178,59 @@ controls:
       different platform explains a Linux Actions runner's failure --
       verify in a matching container). Fix the root cause; don't silence
       the check.
+    incident: 2026-08-02-silent-ci-failures
+
+  - id: ops-workflows-run-from-default-branch
+    title: Operational workflows (scheduled/deploy/reconcile/mirror/sync) must run from the default branch, never a feature branch
+    applies_to: .github/workflows in first-party repos -- scheduled + deploy/reconcile/mirror/sync automation
+    check: >
+      An operational workflow -- one triggered by `schedule`, or whose job
+      deploys/reconciles/mirrors/syncs/provisions live state -- must live and
+      run on the repo's DEFAULT branch, not a feature branch. GitHub only
+      fires `schedule` and `workflow_dispatch` from the default branch, so
+      operational automation stranded on a feature branch silently never
+      runs, and a run dispatched from a feature ref executes unreviewed code.
+      This is the operational-automation companion to github-ci-health-current
+      (which can only watch the default branch): if the automation is not ON
+      the default branch, the health check cannot see it fail. The automated
+      signal is a scheduled workflow that pins a hardcoded non-default
+      checkout `ref:` (proof it is built around a non-default branch); the
+      fuller "exists on the default branch" comparison is a review flag, like
+      cross-repo-path-dependency-pinned. This governs OPERATIONAL runs, NOT
+      day-to-day development -- code still lands via feature branch -> PR ->
+      default branch (see resources/day-to-day-git-workflow.md), so it does
+      not conflict with policy-fabric's directMainPolicy.
+    severity: high
+    remediation: Merge the operational workflow to the default branch and let
+      it trigger there; remove hardcoded feature `ref:` pins. Rehearse an
+      off-branch run in a throwaway workflow, never the production one.
+    incident: 2026-08-02-silent-ci-failures
+
+  - id: ci-secrets-minted-never-static-pat
+    title: CI credentials must be minted in-workflow (WIF / short-lived App token / in-cluster), never a static PAT or a laptop-held secret
+    applies_to: .github/workflows -- any workflow authenticating to GCP, the cluster, a registry (zot/GHCR), or SCM (gitea/GitHub)
+    check: >
+      A workflow must obtain credentials by MINTING them at run time -- GCP
+      Workload Identity Federation (google-github-actions/auth with
+      `workload_identity_provider` + `id-token: write`), a short-lived GitHub
+      App installation token (actions/create-github-app-token), or an
+      in-cluster Job that mounts the secret so it never leaves the cluster --
+      NOT a long-lived Personal Access Token held in a GitHub secret, and
+      never a credential decoded onto a laptop. Two anti-patterns are hard
+      findings: (1) a `secrets.*_PAT` / `*PERSONAL_ACCESS_TOKEN*` used as a
+      credential; (2) google-github-actions/auth configured with a static
+      `credentials_json:` service-account key instead of WIF. The sovereign
+      SCM/registry (gitea, zot) creds live only in-cluster and are reached
+      this way; this narrows socioprophet-agent-standards
+      004-workload-and-service-identity-standard.md to the SCM/CI case.
+      Corollary (enforced by CodeQL py/clear-text-logging-sensitive-data as a
+      required check): tooling that DETECTS secret usage must not itself echo
+      the matched secret reference into its output or logs -- report the file
+      and rule, never the token.
+    severity: high
+    remediation: Replace the PAT with WIF or a minted App token; replace
+      `credentials_json` with `workload_identity_provider`. Rotate the leaked
+      static credential. Never handle the value on a laptop or in a terminal.
+      A scanner for this control must emit the finding's location, not the
+      secret reference it matched.
     incident: 2026-08-02-silent-ci-failures

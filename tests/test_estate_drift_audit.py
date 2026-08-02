@@ -85,8 +85,79 @@ def test_good_fixture_stays_quiet() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _repo_with_workflow(root: Path, name: str, wf_name: str, wf_body: str) -> None:
+    make_bare_repo(root / name)
+    set_fake_remote(root / name, f"git@github.com:example-org/{name}.git")
+    wf_dir = root / name / ".github" / "workflows"
+    wf_dir.mkdir(parents=True)
+    (wf_dir / wf_name).write_text(wf_body)
+
+
+# A scheduled workflow pinned to a feature ref AND leaking a static PAT.
+_BAD_WORKFLOW = (
+    "on:\n"
+    "  schedule:\n"
+    "    - cron: '0 3 * * *'\n"
+    "jobs:\n"
+    "  mirror:\n"
+    "    runs-on: ubuntu-latest\n"
+    "    steps:\n"
+    "      - uses: actions/checkout@v4\n"
+    "        with:\n"
+    "          ref: fix/some-feature\n"
+    "      - run: echo sync\n"
+    "        env:\n"
+    "          TOKEN: ${{ secrets.GITEA_PAT }}\n"
+)
+
+# A scheduled workflow that mints via WIF, no hardcoded ref, no PAT.
+_GOOD_WORKFLOW = (
+    "on:\n"
+    "  schedule:\n"
+    "    - cron: '0 3 * * *'\n"
+    "permissions:\n"
+    "  id-token: write\n"
+    "  contents: read\n"
+    "jobs:\n"
+    "  reconcile:\n"
+    "    runs-on: ubuntu-latest\n"
+    "    steps:\n"
+    "      - uses: actions/checkout@v4\n"
+    "      - uses: google-github-actions/auth@v2\n"
+    "        with:\n"
+    "          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}\n"
+    "          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}\n"
+)
+
+
+def test_bad_workflow_fires() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="git_ops_standards_wf_bad_"))
+    try:
+        _repo_with_workflow(tmp, "bad-ops-repo", "mirror.yml", _BAD_WORKFLOW)
+        rc, out = run_audit(tmp)
+        assert rc == 1, "expected nonzero exit when findings exist"
+        assert "ops-workflows-run-from-default-branch" in out, "feature-ref schedule not flagged"
+        assert "ci-secrets-minted-never-static-pat" in out, "static PAT not flagged"
+        print("PASS: bad workflow -- ops-from-main + minted-secrets controls fire")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_good_workflow_stays_quiet() -> None:
+    tmp = Path(tempfile.mkdtemp(prefix="git_ops_standards_wf_good_"))
+    try:
+        _repo_with_workflow(tmp, "clean-ops-repo", "reconcile.yml", _GOOD_WORKFLOW)
+        rc, out = run_audit(tmp)
+        assert rc == 0, f"expected zero exit on a WIF/default-branch workflow, got:\n{out}"
+        print("PASS: good workflow -- CI-ops controls stay silent on a minted/default-branch workflow")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     test_bad_fixture_fires()
     test_good_fixture_stays_quiet()
+    test_bad_workflow_fires()
+    test_good_workflow_stays_quiet()
     print("\nBoth directions proven: the detector fires on real violations and "
           "stays quiet on a clean tree.")
