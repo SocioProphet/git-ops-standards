@@ -1,0 +1,32 @@
+# Caller stub for the data-catalog contribution mechanism.
+#
+# Drop this file into a contributing repo as `.github/workflows/catalog.yml`.
+# On every merge to main it refreshes that repo's OWN contribution shard in
+# SocioProphet/prophet-core-catalog (Lord Michael's "each repo updates its
+# contribution on merge to main" directive).
+#
+# Prerequisite: the org/repo secret CATALOG_CONTRIB_TOKEN must be set to a MINTED
+# GitHub App / org installation token with contents+pull_requests write on
+# prophet-core-catalog (NOT a personal PAT). Until it is set, this workflow is
+# INERT — it detects the empty token and no-ops. So it is safe to add ahead of
+# the secret.
+#
+# To contribute additional datasets, pass `datasets:` under `with:` as
+# whitespace/comma-separated <dataset>:<extractor> pairs, e.g.
+#   with:
+#     datasets: "regex-operational-dataset:extract_regex ci-workflows-tests:extract_ci_workflows_tests"
+
+name: catalog-contribute
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  contribute:
+    uses: SocioProphet/git-ops-standards/.github/workflows/catalog-contribute.yml@main
+    secrets:
+      catalog_token: ${{ secrets.CATALOG_CONTRIB_TOKEN }}

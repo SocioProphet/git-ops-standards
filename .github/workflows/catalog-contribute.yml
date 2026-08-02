@@ -1,0 +1,119 @@
+name: catalog-contribute
+
+# Reusable workflow: a caller repo runs this on merge to main to refresh ITS OWN
+# contribution shard in the data catalog (SocioProphet/prophet-core-catalog),
+# implementing Lord Michael's "each repo updates its contribution on merge to
+# main" directive.
+#
+# It checks out the caller repo, fetches extractors/ from the catalog repo
+# (pinned by ref = single source of truth for extraction), runs them scoped to
+# the caller, and opens/updates a PR to the catalog writing
+# datasets/<ds>/contributions/<caller-repo>.jsonl.
+#
+# Cross-repo writes use a MINTED GitHub App / org installation token passed as the
+# `catalog_token` secret (NEVER a hard-coded PAT — estate policy: secrets minted
+# in CI). Until that secret is set, the job is INERT: it detects the empty token
+# and exits 0 without touching anything.
+
+on:
+  workflow_call:
+    inputs:
+      catalog_repo:
+        description: "owner/name of the catalog repo to contribute to."
+        type: string
+        default: "SocioProphet/prophet-core-catalog"
+      extractors_ref:
+        description: "git ref of the catalog repo to fetch extractors/ from (pin for reproducibility)."
+        type: string
+        default: "main"
+      datasets:
+        description: >-
+          Whitespace/comma-separated <dataset>:<extractor-module> pairs to run,
+          e.g. "regex-operational-dataset:extract_regex". Defaults to regex only.
+        type: string
+        default: "regex-operational-dataset:extract_regex"
+    secrets:
+      catalog_token:
+        description: "Minted GitHub App/org token with contents+pull_requests write on the catalog repo."
+        required: true
+
+jobs:
+  contribute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard — inert until the catalog token is set
+        id: guard
+        env:
+          CATALOG_TOKEN: ${{ secrets.catalog_token }}
+        run: |
+          if [ -z "${CATALOG_TOKEN}" ]; then
+            echo "CATALOG_CONTRIB_TOKEN is not set — this contributor is INERT (no-op). Exiting 0."
+            echo "active=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout caller repo (read-only scan target)
+        if: steps.guard.outputs.active == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: caller
+
+      - name: Checkout catalog repo (extractors + write target)
+        if: steps.guard.outputs.active == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.catalog_repo }}
+          ref: ${{ inputs.extractors_ref }}
+          token: ${{ secrets.catalog_token }}
+          path: catalog
+
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.active == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Run extractors scoped to the caller repo
+        if: steps.guard.outputs.active == 'true'
+        env:
+          CALLER_REPO: ${{ github.event.repository.name }}
+          DATASETS: ${{ inputs.datasets }}
+        run: |
+          set -euo pipefail
+          for pair in $(echo "${DATASETS}" | tr ',' ' '); do
+            ds="${pair%%:*}"
+            mod="${pair##*:}"
+            out="catalog/datasets/${ds}/contributions/${CALLER_REPO}.jsonl"
+            mkdir -p "catalog/datasets/${ds}/contributions"
+            echo "extracting ${mod} -> ${out}"
+            python3 "catalog/extractors/${mod}.py" caller "${CALLER_REPO}" --out "${out}"
+          done
+
+      - name: Open/update the catalog contribution PR
+        if: steps.guard.outputs.active == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.catalog_token }}
+          CALLER_REPO: ${{ github.event.repository.name }}
+          CATALOG_REPO: ${{ inputs.catalog_repo }}
+        working-directory: catalog
+        run: |
+          set -euo pipefail
+          branch="catalog/contrib-${CALLER_REPO}"
+          git config user.name  "catalog-contributor[bot]"
+          git config user.email "catalog-contributor[bot]@users.noreply.github.com"
+          git checkout -B "${branch}"
+          git add datasets/*/contributions/${CALLER_REPO}.jsonl 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "no shard changes for ${CALLER_REPO} — nothing to contribute (idempotent no-op)."
+            exit 0
+          fi
+          git commit -m "chore(catalog): refresh ${CALLER_REPO} contribution shard(s)"
+          git push --force-with-lease origin "${branch}"
+          if [ -z "$(gh pr list --repo "${CATALOG_REPO}" --head "${branch}" --state open --json number -q '.[].number')" ]; then
+            gh pr create --repo "${CATALOG_REPO}" \
+              --base main --head "${branch}" \
+              --title "chore(catalog): ${CALLER_REPO} contribution shard" \
+              --body "Automated per-repo catalog contribution from \`${CALLER_REPO}\` on merge to main (Lord Michael's 'each repo updates its contribution' directive). Regenerated by the git-ops-standards reusable workflow; merging triggers assemble-catalog.yml."
+          else
+            echo "PR already open for ${branch} — push updated it."
+          fi
