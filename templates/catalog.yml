@@ -5,13 +5,15 @@
 # SocioProphet/prophet-core-catalog (Lord Michael's "each repo updates its
 # contribution on merge to main" directive).
 #
-# Prerequisite (estate policy: secrets are MINTED IN CI, never PATs): the two
-# org secrets CATALOG_APP_ID + CATALOG_APP_PRIVATE_KEY of the
-# `socioprophet-catalog-contributor` GitHub App must exist. The reusable
-# workflow uses them to MINT a short-lived installation token in CI (contents +
-# pull_requests write on prophet-core-catalog only). Until BOTH are set this
-# workflow is INERT — it detects the missing credentials and no-ops. So it is
-# safe to add ahead of the App.
+# CREDENTIAL — nothing for you to set. Estate policy is secrets are MINTED IN CI,
+# never PATs, and never a per-consumer operator secret. The reusable workflow
+# mints a short-lived, catalog-scoped GitHub App installation token itself, from
+# the estate's SHARED ops App (the same GH_OPS_APP_ID / GH_OPS_APP_PRIVATE_KEY
+# org secrets board-parity.yml and estate-ci-health.yml already use). Those org
+# secrets ALREADY EXIST — `secrets: inherit` just forwards them; you create no
+# new secret. Until the shared App is configured (vars.GH_OPS_APP_CONFIGURED ==
+# 'true') the workflow is INERT — it no-ops and exits 0 — so it is safe to add
+# ahead of the App bootstrap.
 #
 # To contribute additional datasets, pass `datasets:` under `with:` as
 # whitespace/comma-separated <dataset>:<extractor> pairs, e.g.
@@ -36,7 +38,15 @@ permissions:
 jobs:
   contribute:
     uses: SocioProphet/git-ops-standards/.github/workflows/catalog-contribute.yml@main
-    # Passes CATALOG_APP_ID / CATALOG_APP_PRIVATE_KEY through so the reusable
-    # workflow can mint the catalog token in CI. `inherit` forwards all org
-    # secrets; map the two explicitly instead if you prefer least exposure.
-    secrets: inherit
+    # The reusable workflow mints the catalog token in CI from the SHARED ops-App
+    # org secrets (GH_OPS_APP_ID / GH_OPS_APP_PRIVATE_KEY). These already exist;
+    # you create no new secret. Two ways to pass them:
+    #
+    #   RECOMMENDED — map ONLY the two the workflow needs (least exposure):
+    secrets:
+      GH_OPS_APP_ID: ${{ secrets.GH_OPS_APP_ID }}
+      GH_OPS_APP_PRIVATE_KEY: ${{ secrets.GH_OPS_APP_PRIVATE_KEY }}
+    #
+    #   Or, if you prefer, `secrets: inherit` (forwards ALL your secrets — simpler
+    #   but broader). Replace the `secrets:` block above with a single line:
+    #     secrets: inherit

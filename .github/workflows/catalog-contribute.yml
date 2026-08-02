@@ -10,28 +10,37 @@ name: catalog-contribute
 # the caller, and opens/updates a PR to the catalog writing
 # datasets/<ds>/contributions/<caller-repo>.jsonl.
 #
-# CROSS-REPO CREDENTIAL — MINTED IN CI, NEVER A PAT (estate policy: secrets are
-# minted in CI). This workflow does NOT accept a pre-minted token. It MINTS a
-# short-lived GitHub App installation token IN CI via
-# actions/create-github-app-token, scoped to prophet-core-catalog only, from the
-# App's id + private key. The App is `socioprophet-catalog-contributor` — a
-# GitHub App installed on SocioProphet/prophet-core-catalog with contents:write
-# + pull_requests:write on THAT repo only (no org-admin, no other repos). Callers
-# wire two org secrets (inherit or map explicitly):
+# CREDENTIAL — MINTED IN CI, NEVER A HUMAN-SET SECRET
+# ---------------------------------------------------
+# The cross-repo write to prophet-core-catalog needs a credential. Per estate
+# policy (secrets are MINTED in CI, never long-lived PATs, and no per-consumer
+# operator secret), this workflow mints a SHORT-LIVED GitHub App installation
+# token itself, from the estate's SHARED ops App — the same App board-parity.yml
+# and estate-ci-health.yml already mint from:
 #
-#   jobs:
-#     contribute:
-#       permissions:
-#         contents: read
-#       uses: SocioProphet/git-ops-standards/.github/workflows/catalog-contribute.yml@<sha>
-#       secrets: inherit          # or map CATALOG_APP_ID / CATALOG_APP_PRIVATE_KEY explicitly
+#   secrets.GH_OPS_APP_ID           — the shared org App's numeric id
+#   secrets.GH_OPS_APP_PRIVATE_KEY  — its PEM private key
+#   vars.GH_OPS_APP_CONFIGURED      — 'true' once the App is bootstrapped
 #
-# The minted token (steps.mint.outputs.token) — not the workflow's own
-# GITHUB_TOKEN — performs the cross-repo checkout, push and PR, so the top-level
-# `permissions:` below only needs `contents: read` (to check out the caller).
-# The token is short-lived (expires when the job ends) and auto-revoked. Until
-# BOTH app secrets are set the job is INERT: it exits 0 without touching anything,
-# so consumers are safe to wire ahead of the App.
+# These org secrets ALREADY EXIST (one-time estate bootstrap, shared across all
+# ops workflows); a catalog consumer sets NOTHING. There is NO catalog-specific
+# secret — no CATALOG_APP_ID, no CATALOG_APP_PRIVATE_KEY, no CATALOG_CONTRIB_TOKEN.
+# `actions/create-github-app-token` signs a JWT with the App key and exchanges it
+# for an installation token scoped (via `repositories:`) to prophet-core-catalog
+# ONLY, so even though the App is installed org-wide the minted token can write
+# nowhere else. The token expires when the job ends; the private key is never
+# echoed and the token is never hard-coded.
+#
+# The two App secrets are DECLARED named inputs below (both required: false), so
+# a caller can map ONLY those two (least exposure, recommended) or fall back to
+# `secrets: inherit` — either way these are ORG secrets already provisioned for
+# the ops App, so passing them sets no new secret; it just makes the existing
+# ones visible to this called workflow. See templates/catalog.yml.
+#
+# INERT until the shared App is configured: if vars.GH_OPS_APP_CONFIGURED != true
+# (or the secrets are absent) the job no-ops and exits 0 — exactly like
+# board-parity.yml and estate-ci-health.yml — so consumers are safe to wire ahead
+# of the App bootstrap.
 
 on:
   workflow_call:
@@ -57,21 +66,28 @@ on:
         type: string
         default: "regex-operational-dataset:extract_regex"
     secrets:
-      CATALOG_APP_ID:
+      # Named so the reusable-workflow interface is EXPLICIT: a caller can map
+      # ONLY these two (least exposure) instead of `secrets: inherit`-ing every
+      # secret it holds. Both required: false so `secrets: inherit` still works
+      # and, when they are absent, the inert-guard trips (job no-ops, exits 0).
+      # The credential is still MINTED in CI from these org secrets — never a
+      # pre-made token passed in. See the header note.
+      GH_OPS_APP_ID:
         description: >-
-          App id of the `socioprophet-catalog-contributor` GitHub App. Used to
-          MINT a short-lived installation token in CI. Not required so the job
-          can stay inert until the App is wired.
+          Numeric id of the estate's shared ops GitHub App (same one board-parity
+          / estate-ci-health mint from). Used to MINT a short-lived, catalog-scoped
+          installation token in CI.
         required: false
-      CATALOG_APP_PRIVATE_KEY:
+      GH_OPS_APP_PRIVATE_KEY:
         description: >-
-          PEM private key of the `socioprophet-catalog-contributor` GitHub App.
-          Used to MINT a short-lived installation token in CI. Never a PAT.
+          PEM private key of the shared ops App. Used to MINT the token in CI.
+          Never a PAT, never echoed.
         required: false
 
 # Least privilege, matching this repo's reusable-workflow convention
 # (.github/workflows/pr-merge-gate.yml). The cross-repo write is done with the
-# MINTED app token, so the built-in GITHUB_TOKEN only needs read to check out.
+# MINTED installation token, so the built-in GITHUB_TOKEN only needs read to
+# check out the caller.
 permissions:
   contents: read
 
@@ -79,12 +95,13 @@ jobs:
   contribute:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve caller repo name + inert-credential guard
+      - name: Resolve caller repo name + inert guard
         id: guard
         env:
-          CATALOG_APP_ID: ${{ secrets.CATALOG_APP_ID }}
-          CATALOG_APP_PRIVATE_KEY: ${{ secrets.CATALOG_APP_PRIVATE_KEY }}
           INPUT_REPO_NAME: ${{ inputs.repo_name }}
+          APP_CONFIGURED: ${{ vars.GH_OPS_APP_CONFIGURED }}
+          APP_ID: ${{ secrets.GH_OPS_APP_ID }}
+          APP_KEY: ${{ secrets.GH_OPS_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           # Reliable caller repo name: prefer the explicit input, else strip the
@@ -101,25 +118,30 @@ jobs:
           fi
           echo "repo_name=${name}" >> "$GITHUB_OUTPUT"
           echo "resolved caller repo name: ${name}"
-          # Inert until BOTH app credentials are wired. We mint the token in CI
-          # (never a PAT); with either secret missing there is nothing to mint,
-          # so no-op cleanly. The message names the SECRETS callers must set.
-          if [ -z "${CATALOG_APP_ID}" ] || [ -z "${CATALOG_APP_PRIVATE_KEY}" ]; then
-            echo "CATALOG_APP_ID / CATALOG_APP_PRIVATE_KEY not both set -- cannot mint the catalog token; this contributor is INERT (no-op). Exiting 0."
-            echo "active=false" >> "$GITHUB_OUTPUT"
-          else
+
+          # Inert until the SHARED ops App is bootstrapped. Gated on the same
+          # vars.GH_OPS_APP_CONFIGURED flag board-parity.yml / estate-ci-health.yml
+          # use, and defensively re-checks the two secrets are actually forwarded
+          # (a caller that forgot `secrets: inherit` would otherwise mint nothing).
+          if [ "${APP_CONFIGURED}" = "true" ] && [ -n "${APP_ID}" ] && [ -n "${APP_KEY}" ]; then
             echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "GH_OPS App not configured/forwarded (vars.GH_OPS_APP_CONFIGURED != true, or the caller"
+            echo "did not 'secrets: inherit' GH_OPS_APP_ID/GH_OPS_APP_PRIVATE_KEY) -- this contributor is"
+            echo "INERT (no-op). Exiting 0."
+            echo "active=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Mint short-lived catalog token (GitHub App installation token)
-        id: mint
+      - name: Mint catalog-scoped App token (never a static PAT)
+        id: app-token
         if: steps.guard.outputs.active == 'true'
         uses: actions/create-github-app-token@v1
         with:
-          app-id: ${{ secrets.CATALOG_APP_ID }}
-          private-key: ${{ secrets.CATALOG_APP_PRIVATE_KEY }}
-          owner: SocioProphet
-          # Scope the installation token to the catalog repo ONLY.
+          app-id: ${{ secrets.GH_OPS_APP_ID }}
+          private-key: ${{ secrets.GH_OPS_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          # Scope the installation token to the catalog repo ONLY. The App is
+          # installed org-wide, but this token can write nowhere else.
           repositories: prophet-core-catalog
 
       - name: Checkout caller repo (read-only scan target)
@@ -134,7 +156,7 @@ jobs:
         with:
           repository: ${{ inputs.catalog_repo }}
           ref: ${{ inputs.extractors_ref }}
-          token: ${{ steps.mint.outputs.token }}
+          token: ${{ steps.app-token.outputs.token }}
           path: catalog
 
       - uses: actions/setup-python@v5
@@ -161,7 +183,7 @@ jobs:
       - name: Open/update the catalog contribution PR
         if: steps.guard.outputs.active == 'true'
         env:
-          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CALLER_REPO: ${{ steps.guard.outputs.repo_name }}
           CATALOG_REPO: ${{ inputs.catalog_repo }}
         working-directory: catalog
