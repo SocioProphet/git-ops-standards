@@ -5,11 +5,13 @@
 # SocioProphet/prophet-core-catalog (Lord Michael's "each repo updates its
 # contribution on merge to main" directive).
 #
-# Prerequisite: the org/repo secret CATALOG_CONTRIB_TOKEN must be set to a MINTED
-# GitHub App / org installation token with contents+pull_requests write on
-# prophet-core-catalog (NOT a personal PAT). Until it is set, this workflow is
-# INERT — it detects the empty token and no-ops. So it is safe to add ahead of
-# the secret.
+# Prerequisite (estate policy: secrets are MINTED IN CI, never PATs): the two
+# org secrets CATALOG_APP_ID + CATALOG_APP_PRIVATE_KEY of the
+# `socioprophet-catalog-contributor` GitHub App must exist. The reusable
+# workflow uses them to MINT a short-lived installation token in CI (contents +
+# pull_requests write on prophet-core-catalog only). Until BOTH are set this
+# workflow is INERT — it detects the missing credentials and no-ops. So it is
+# safe to add ahead of the App.
 #
 # To contribute additional datasets, pass `datasets:` under `with:` as
 # whitespace/comma-separated <dataset>:<extractor> pairs, e.g.
@@ -34,5 +36,7 @@ permissions:
 jobs:
   contribute:
     uses: SocioProphet/git-ops-standards/.github/workflows/catalog-contribute.yml@main
-    secrets:
-      catalog_token: ${{ secrets.CATALOG_CONTRIB_TOKEN }}
+    # Passes CATALOG_APP_ID / CATALOG_APP_PRIVATE_KEY through so the reusable
+    # workflow can mint the catalog token in CI. `inherit` forwards all org
+    # secrets; map the two explicitly instead if you prefer least exposure.
+    secrets: inherit

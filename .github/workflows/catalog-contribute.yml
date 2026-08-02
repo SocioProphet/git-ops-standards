@@ -10,24 +10,28 @@ name: catalog-contribute
 # the caller, and opens/updates a PR to the catalog writing
 # datasets/<ds>/contributions/<caller-repo>.jsonl.
 #
-# Secret -> input mapping (callers MUST wire this): the caller's org/repo secret
-# `CATALOG_CONTRIB_TOKEN` is passed into this workflow as the `catalog_token`
-# secret input, e.g.
+# CROSS-REPO CREDENTIAL — MINTED IN CI, NEVER A PAT (estate policy: secrets are
+# minted in CI). This workflow does NOT accept a pre-minted token. It MINTS a
+# short-lived GitHub App installation token IN CI via
+# actions/create-github-app-token, scoped to prophet-core-catalog only, from the
+# App's id + private key. The App is `socioprophet-catalog-contributor` — a
+# GitHub App installed on SocioProphet/prophet-core-catalog with contents:write
+# + pull_requests:write on THAT repo only (no org-admin, no other repos). Callers
+# wire two org secrets (inherit or map explicitly):
 #
 #   jobs:
 #     contribute:
 #       permissions:
 #         contents: read
-#       uses: SocioProphet/git-ops-standards/.github/workflows/catalog-contribute.yml@main
-#       secrets:
-#         catalog_token: ${{ secrets.CATALOG_CONTRIB_TOKEN }}
+#       uses: SocioProphet/git-ops-standards/.github/workflows/catalog-contribute.yml@<sha>
+#       secrets: inherit          # or map CATALOG_APP_ID / CATALOG_APP_PRIVATE_KEY explicitly
 #
-# `catalog_token` must be a MINTED GitHub App / org installation token (NEVER a
-# hard-coded PAT -- estate policy: secrets minted in CI) with contents+pull_requests
-# write on the catalog repo. The cross-repo write uses THIS token, not the
-# workflow's own GITHUB_TOKEN -- so the top-level `permissions:` below only needs
-# `contents: read` (to check out the caller). Until the secret is set the input
-# resolves empty and the job is INERT: it exits 0 without touching anything.
+# The minted token (steps.mint.outputs.token) — not the workflow's own
+# GITHUB_TOKEN — performs the cross-repo checkout, push and PR, so the top-level
+# `permissions:` below only needs `contents: read` (to check out the caller).
+# The token is short-lived (expires when the job ends) and auto-revoked. Until
+# BOTH app secrets are set the job is INERT: it exits 0 without touching anything,
+# so consumers are safe to wire ahead of the App.
 
 on:
   workflow_call:
@@ -53,13 +57,21 @@ on:
         type: string
         default: "regex-operational-dataset:extract_regex"
     secrets:
-      catalog_token:
-        description: "Minted GitHub App/org token (contents+pull_requests write on the catalog repo). Callers pass secrets.CATALOG_CONTRIB_TOKEN here."
-        required: true
+      CATALOG_APP_ID:
+        description: >-
+          App id of the `socioprophet-catalog-contributor` GitHub App. Used to
+          MINT a short-lived installation token in CI. Not required so the job
+          can stay inert until the App is wired.
+        required: false
+      CATALOG_APP_PRIVATE_KEY:
+        description: >-
+          PEM private key of the `socioprophet-catalog-contributor` GitHub App.
+          Used to MINT a short-lived installation token in CI. Never a PAT.
+        required: false
 
 # Least privilege, matching this repo's reusable-workflow convention
-# (.github/workflows/pr-merge-gate.yml). The cross-repo write is done with
-# `catalog_token`, so the built-in GITHUB_TOKEN only needs read to check out.
+# (.github/workflows/pr-merge-gate.yml). The cross-repo write is done with the
+# MINTED app token, so the built-in GITHUB_TOKEN only needs read to check out.
 permissions:
   contents: read
 
@@ -67,10 +79,11 @@ jobs:
   contribute:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve caller repo name + inert-token guard
+      - name: Resolve caller repo name + inert-credential guard
         id: guard
         env:
-          CATALOG_TOKEN: ${{ secrets.catalog_token }}
+          CATALOG_APP_ID: ${{ secrets.CATALOG_APP_ID }}
+          CATALOG_APP_PRIVATE_KEY: ${{ secrets.CATALOG_APP_PRIVATE_KEY }}
           INPUT_REPO_NAME: ${{ inputs.repo_name }}
         run: |
           set -euo pipefail
@@ -88,14 +101,26 @@ jobs:
           fi
           echo "repo_name=${name}" >> "$GITHUB_OUTPUT"
           echo "resolved caller repo name: ${name}"
-          # Inert until the token is wired. The message names the INPUT so callers
-          # know which knob is missing (they map CATALOG_CONTRIB_TOKEN -> catalog_token).
-          if [ -z "${CATALOG_TOKEN}" ]; then
-            echo "secrets.catalog_token (mapped from the caller's CATALOG_CONTRIB_TOKEN) is not set -- this contributor is INERT (no-op). Exiting 0."
+          # Inert until BOTH app credentials are wired. We mint the token in CI
+          # (never a PAT); with either secret missing there is nothing to mint,
+          # so no-op cleanly. The message names the SECRETS callers must set.
+          if [ -z "${CATALOG_APP_ID}" ] || [ -z "${CATALOG_APP_PRIVATE_KEY}" ]; then
+            echo "CATALOG_APP_ID / CATALOG_APP_PRIVATE_KEY not both set -- cannot mint the catalog token; this contributor is INERT (no-op). Exiting 0."
             echo "active=false" >> "$GITHUB_OUTPUT"
           else
             echo "active=true" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Mint short-lived catalog token (GitHub App installation token)
+        id: mint
+        if: steps.guard.outputs.active == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.CATALOG_APP_ID }}
+          private-key: ${{ secrets.CATALOG_APP_PRIVATE_KEY }}
+          owner: SocioProphet
+          # Scope the installation token to the catalog repo ONLY.
+          repositories: prophet-core-catalog
 
       - name: Checkout caller repo (read-only scan target)
         if: steps.guard.outputs.active == 'true'
@@ -109,7 +134,7 @@ jobs:
         with:
           repository: ${{ inputs.catalog_repo }}
           ref: ${{ inputs.extractors_ref }}
-          token: ${{ secrets.catalog_token }}
+          token: ${{ steps.mint.outputs.token }}
           path: catalog
 
       - uses: actions/setup-python@v5
@@ -136,7 +161,7 @@ jobs:
       - name: Open/update the catalog contribution PR
         if: steps.guard.outputs.active == 'true'
         env:
-          GH_TOKEN: ${{ secrets.catalog_token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
           CALLER_REPO: ${{ steps.guard.outputs.repo_name }}
           CATALOG_REPO: ${{ inputs.catalog_repo }}
         working-directory: catalog
