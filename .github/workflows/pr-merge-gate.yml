@@ -23,9 +23,32 @@ name: pr-merge-gate (git-ops-standards)
 # Then make it a required status check in branch protection. That's the
 # step that actually gives this teeth: a required check blocks the merge
 # button regardless of who -- or what -- authored the PR.
-
+#
+# ── workflow_call inputs (2026-08-03) ──────────────────────────────────────────────
+# A PR opened by a bot with GITHUB_TOKEN (vendor-freshness-detect.yml,
+# gitops-promote.yml, and anything shaped like them) never gets a pull_request-
+# triggered run of its own -- the no-recursion rule. The caller repo's workflow
+# has to dispatch this one via workflow_dispatch instead, which has no
+# github.event.pull_request to read pr number / base / head sha from. These three
+# optional inputs let a workflow_dispatch caller supply them explicitly; a normal
+# pull_request-triggered run leaves them empty and falls through to the event
+# context exactly as before -- this is additive, not a behavior change for the
+# common path.
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      pr_number:
+        type: string
+        required: false
+        default: ''
+      base_sha:
+        type: string
+        required: false
+        default: ''
+      head_sha:
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -45,10 +68,19 @@ jobs:
           repository: SocioProphet/git-ops-standards
           path: _git-ops-standards
 
+      - name: Resolve PR context (workflow_dispatch input overrides pull_request event)
+        id: ctx
+        run: |
+          {
+            echo "pr_number=${{ inputs.pr_number || github.event.pull_request.number }}"
+            echo "base_sha=${{ inputs.base_sha || github.event.pull_request.base.sha }}"
+            echo "head_sha=${{ inputs.head_sha || github.event.pull_request.head.sha }}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Check unpinned cross-repo path dependencies in this PR's diff
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ steps.ctx.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.ctx.outputs.head_sha }}
         run: |
           python3 _git-ops-standards/scripts/check_path_dependency_pins.py \
             --base "${BASE_SHA:-HEAD~1}" --head "${HEAD_SHA:-HEAD}"
@@ -56,7 +88,7 @@ jobs:
       - name: Check PR is mergeable and has no unresolved review threads
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
           REPO: ${{ github.repository }}
         run: |
           python3 _git-ops-standards/scripts/check_pr_merge_readiness.py \
