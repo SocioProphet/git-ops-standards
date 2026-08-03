@@ -1,0 +1,89 @@
+name: estate-sovereign-governance
+
+# Org-wide, read-only audit of the SOVEREIGN substrates' desired-state, implementing
+# core/controls.yaml's sovereign-git-protection-declared, sovereign-registry-policy-enforced,
+# and sovereign-worktracking-native-integrated. See
+# estate/incident-log/2026-08-03-sovereign-governance-only-on-mirror.md — governance must be
+# enforced on the sovereign source of truth (Gitea / zot / agora-over-HellGraph), not just the
+# GitHub mirror.
+#
+# TWO FACT SOURCES (kept separate on purpose):
+#   * COMMITTED artifacts across the substrate repos (gh api contents) — always audited, needs
+#     only a read token.
+#   * IN-CLUSTER live state (is the Kyverno controller admitting verify-signed-images? does the
+#     Gitea authority's live protection match the committed spec?) — reachable ONLY from CI via
+#     WIF -> GKE, NEVER a laptop-held secret or a static PAT (ci-secrets-minted-never-static-pat).
+#     Gated on vars.GCP_WIF_CONFIGURED so the committed-artifact audit still runs before the WIF
+#     trust is wired; when unconfigured, in-cluster facts stay UNKNOWN (soft notes, not failures).
+#
+# DETECT only. Live reconcile of each substrate happens through its OWN gated path — ArgoCD sync
+# for the zot config, deploy-gitea-authority behind gitea-sovereign ADR-0006 for Gitea protection,
+# the agora deploy for work-tracking — not a blind mutation from here (detect != control-loop).
+# This is an operational workflow and runs from the default branch (ops-workflows-run-from-default-branch).
+
+on:
+  schedule:
+    - cron: "47 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write   # WIF: mint a short-lived GCP token in-workflow; no static key.
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.3.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+
+      # In-cluster verification (optional): mint a GCP token via WIF and read live state.
+      - name: WIF -> GCP (skipped until the trust is configured)
+        id: gcp
+        if: ${{ vars.GCP_WIF_CONFIGURED == 'true' }}
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed  # v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - name: Get GKE credentials
+        if: ${{ vars.GCP_WIF_CONFIGURED == 'true' }}
+        uses: google-github-actions/get-gke-credentials@64bc7249bbcf78056bb92f14d3cedc2da193946c  # v2
+        with:
+          cluster_name: prophet-platform
+          location: us-central1
+
+      - name: Gather in-cluster facts (only if authed to the cluster)
+        id: incluster
+        if: ${{ vars.GCP_WIF_CONFIGURED == 'true' }}
+        run: |
+          # Is the Kyverno controller present AND admitting verify-signed-images (Ready)?
+          if kubectl get clusterpolicy cloudshell-verify-signed-images >/dev/null 2>&1; then
+            ready=$(kubectl get clusterpolicy cloudshell-verify-signed-images \
+                     -o jsonpath='{.status.ready}' 2>/dev/null || echo "")
+            [ "$ready" = "true" ] && echo "kyverno=true" >> "$GITHUB_OUTPUT" || echo "kyverno=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "kyverno=false" >> "$GITHUB_OUTPUT"   # no controller/policy admitted => declared, not enforced
+          fi
+
+      - name: Sovereign-governance audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # `|| true`: the audit exits 1 on a real hard finding; keep the explanatory output visible
+          # under bash -e before the final decision (the estate-ci-health lesson).
+          extra=""
+          if [ "${{ vars.GCP_WIF_CONFIGURED }}" = "true" ] && [ -n "${{ steps.incluster.outputs.kyverno }}" ]; then
+            extra="--kyverno-installed ${{ steps.incluster.outputs.kyverno }}"
+          fi
+          python3 scripts/estate_sovereign_governance_audit.py --json $extra > /tmp/sov.json || true
+          cat /tmp/sov.json
+          python3 -c "
+          import json, sys
+          d = json.load(open('/tmp/sov.json'))
+          hard = [f for f in d['findings'] if f['severity'] == 'high']
+          print(f\"\n{len(hard)} hard sovereign-governance finding(s).\")
+          sys.exit(1 if hard else 0)
+          "

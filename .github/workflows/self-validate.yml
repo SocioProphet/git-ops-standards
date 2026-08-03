@@ -28,3 +28,5 @@ jobs:
         run: python3 tests/test_estate_ci_health_audit.py
       - name: Prove estate_branch_protection_audit.py fires both ways
         run: python3 tests/test_estate_branch_protection_audit.py
+      - name: Prove estate_sovereign_governance_audit.py fires both ways
+        run: python3 tests/test_estate_sovereign_governance_audit.py
