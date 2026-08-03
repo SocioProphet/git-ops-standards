@@ -70,11 +70,25 @@ jobs:
 
       - name: Resolve PR context (workflow_dispatch input overrides pull_request event)
         id: ctx
+        # Values pass through env:, never spliced directly into the run: script --
+        # inputs.* (and the pull_request event fields) are potentially
+        # externally-controlled on a public workflow_call, and interpolating
+        # ${{ }} straight into a shell script is the documented GitHub Actions
+        # script-injection pattern (CodeQL flagged exactly this on the first cut
+        # of this step). env: assignment happens at the runner-process level, not
+        # by re-parsing the value as shell text, which closes it.
+        env:
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          INPUT_BASE_SHA: ${{ inputs.base_sha }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           {
-            echo "pr_number=${{ inputs.pr_number || github.event.pull_request.number }}"
-            echo "base_sha=${{ inputs.base_sha || github.event.pull_request.base.sha }}"
-            echo "head_sha=${{ inputs.head_sha || github.event.pull_request.head.sha }}"
+            echo "pr_number=${INPUT_PR_NUMBER:-$EVENT_PR_NUMBER}"
+            echo "base_sha=${INPUT_BASE_SHA:-$EVENT_BASE_SHA}"
+            echo "head_sha=${INPUT_HEAD_SHA:-$EVENT_HEAD_SHA}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Check unpinned cross-repo path dependencies in this PR's diff
