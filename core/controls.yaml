@@ -15,7 +15,7 @@
 # is a checkable condition (scripts/check_registry_staleness.py), not a
 # silent drift.
 
-version: "1.3.0"
+version: "1.4.0"
 
 controls:
   - id: naming-canonical-bare-name
@@ -266,3 +266,66 @@ controls:
       that file). Never leave protection weaker than the committed spec -- that
       is itself the drift this control detects.
     incident: 2026-08-03-advisory-ci-unprotected-main
+
+  - id: sovereign-git-protection-declared
+    title: The sovereign Gitea authority must have committed repo-protection desired-state, reconciled in-cluster
+    applies_to: the sovereign git substrate (gitea-sovereign + prophet-platform/deploy/gitea-authority)
+    check: >
+      Sovereign git is the source of truth GitHub mirrors, so its per-repo protection/ruleset
+      posture must be a COMMITTED desired-state artifact, not implicit or GitHub-only. A committed
+      sovereign-git protection spec must exist (a closed, schema-validated config in gitea-sovereign
+      following its make-validate scaffold), and the live Gitea authority must be reconciled to
+      match it. Absence of a committed spec, or live protection that drifts from it, is the finding.
+      Because live Gitea mutation is gated behind gitea-sovereign ADR-0006 (runtime-binding gates:
+      fail-closed, audit + receipt, negative-path tests), the reconcile must run through that gate
+      from CI in-cluster (WIF -> GKE -> authority-minted short-lived token), never a laptop-held or
+      static credential (ci-secrets-minted-never-static-pat). Read-only audit is scheduled; reconcile
+      is a deliberate workflow_dispatch. GitHub branch protection (main-branch-protection-enforced)
+      is the MIRROR of this, not the source.
+    severity: high
+    remediation: >
+      Commit the sovereign-git protection desired-state (schema + fixtures in gitea-sovereign);
+      reconcile the live authority to it via the in-cluster CI path behind ADR-0006. Never declare
+      protection only on the GitHub mirror.
+    incident: 2026-08-03-sovereign-governance-only-on-mirror
+
+  - id: sovereign-registry-policy-enforced
+    title: The sovereign registry (zot) desired-state must be committed AND signature verification actually installed
+    applies_to: the sovereign registry substrate (prophet-platform/infra/k8s/zot + infra/policy .../verify-signed-images)
+    check: >
+      zot's desired-state (storage retention/gc, a login-wall with NO anonymous read/write, and
+      pull-through sync) must be a committed, ArgoCD-reconciled config
+      (infra/k8s/zot/base/configmap.yaml). Separately, image-signature enforcement must be not just
+      DECLARED but INSTALLED: the Kyverno verify-signed-images ClusterPolicy
+      (validationFailureAction: Enforce, keyless cosign/Fulcio, rekor) must have a running Kyverno
+      controller admitting it -- a policy file present in the repo while no controller is connected
+      is a declared-not-enforced control (the exact gap found 2026-08-03: the policy file itself
+      states it is not yet installed). Hard findings: retention/login-wall/anonymous drift in the
+      committed config; or the signing policy present-but-not-installed. Reconciled via ArgoCD/WIF,
+      never a laptop credential.
+    severity: high
+    remediation: >
+      Keep the zot configmap as the committed desired-state (retention + login-wall + no anonymous);
+      INSTALL the Kyverno controller and admit verify-signed-images so signing is enforced, not just
+      written. Verify enforcement against the running cluster, not the file's presence.
+    incident: 2026-08-03-sovereign-governance-only-on-mirror
+
+  - id: sovereign-worktracking-native-integrated
+    title: Sovereign work-tracking is agora-over-HellGraph (not external Jira), deployed and integrated
+    applies_to: the sovereign work-tracking substrate (prophet-platform/apps/agora, deploy/values/agora.yaml)
+    check: >
+      The sovereign work+knowledge plane is agora over HellGraph (the native Jira/Confluence
+      replacement), and it -- not an external Jira/Linear/GitHub-Issues -- is the source of truth;
+      external trackers are optional connectors only. As an audited control: agora must be deployed
+      (deploy/values/agora.yaml present + a service manifest), its work items must persist as
+      HellGraph facts (not a mirrored external store), and its integrations must be wired --
+      prophet-workspace (the workspace surface), the sociosphere CI, and the graph. A committed
+      dependency/config that makes an EXTERNAL Jira the system of record for estate work, or a
+      missing agora deployment / HellGraph binding / prophet-workspace + sociosphere-CI integration,
+      is the finding.
+    severity: medium
+    remediation: >
+      Ensure agora is deployed and is the source of truth (work items as HellGraph facts), with its
+      prophet-workspace, sociosphere-CI, and graph integrations present; keep any external Jira as an
+      optional connector, never the system of record.
+    incident: 2026-08-03-sovereign-governance-only-on-mirror
