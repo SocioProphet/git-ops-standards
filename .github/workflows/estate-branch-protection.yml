@@ -1,0 +1,111 @@
+name: estate-branch-protection
+
+# Org-wide, read-only audit implementing core/controls.yaml's
+# main-branch-protection-enforced. See estate/incident-log/2026-08-03-advisory-ci-unprotected-main.md:
+# cybernetic-genesis had a fail-closed CI gate that nothing REQUIRED (advisory),
+# then protection was applied imperatively (`gh api PUT`) and silently drifted
+# (enforce_admins flipped off out of band) because it lived only as live state
+# with no committed source of truth.
+#
+# Each repo that opts in commits `.github/branch-protection.main.json` (the exact
+# classic-protection API body). This workflow flags any repo whose LIVE protection
+# drifts from, or is absent despite, that committed spec.
+#
+# TOKEN SCOPE (same posture as estate-ci-health, honestly stated):
+#   * reading each repo's committed SPEC needs `contents: read`;
+#   * verifying LIVE protection needs `administration: read`;
+#   * the optional RECONCILE dispatch (apply the spec) needs `administration: write`.
+# The default GITHUB_TOKEN is repo-scoped and cannot see other repos, so this mints
+# a short-lived GitHub App installation token instead (this estate's rule: secrets
+# minted in CI, never a static PAT -- ci-secrets-minted-never-static-pat). Requires
+# an App installed org-wide; add its creds as this repo's secrets and set the var:
+#   GH_OPS_APP_ID, GH_OPS_APP_PRIVATE_KEY, and vars.GH_OPS_APP_CONFIGURED == 'true'.
+# The org's existing App (app_id 1236702) has contents+metadata read; extend it (or
+# use a dedicated admin App) with administration:read to verify live protection and
+# administration:write to reconcile. Where the token can't read live protection the
+# script degrades to a soft note ("cannot verify"), never a false finding.
+#
+# DETECT runs on a schedule (read-only). RECONCILE (writing live protection from the
+# committed spec) is NEVER scheduled -- it is a deliberate workflow_dispatch with
+# reconcile=true, so live security state is only ever mutated on an explicit human run.
+
+on:
+  schedule:
+    - cron: "37 6 * * *"   # daily read-only drift scan
+  workflow_dispatch:
+    inputs:
+      reconcile:
+        description: "Apply each repo's committed spec to live protection (WRITE). Leave false for a read-only audit."
+        type: boolean
+        default: false
+      repos:
+        description: "Comma-separated repo names to limit to (optional; default = all first-party)."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Mint an org-scoped token (skipped if secrets aren't configured yet)
+        id: app-token
+        if: ${{ vars.GH_OPS_APP_CONFIGURED == 'true' }}
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_OPS_APP_ID }}
+          private-key: ${{ secrets.GH_OPS_APP_PRIVATE_KEY }}
+          owner: SocioProphet
+
+      - name: Audit branch protection against the committed specs (read-only)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          REPOS: ${{ github.event.inputs.repos }}
+        run: |
+          # `|| true`: the script legitimately exits 1 on a real finding, but this
+          # step runs under bash -e -- without `|| true` that expected non-zero exit
+          # would abort before the explaining output prints (the estate-ci-health
+          # lesson). The final python exit below decides pass/fail, after output.
+          args="--org SocioProphet --json"
+          [ -n "$REPOS" ] && args="$args --repos $REPOS"
+          python3 scripts/estate_branch_protection_audit.py $args > /tmp/bp.json || true
+          cat /tmp/bp.json
+          python3 -c "
+          import json, sys
+          d = json.load(open('/tmp/bp.json'))
+          hard = [f for f in d['findings'] if f['severity'] == 'high']
+          print(f\"\n{len(hard)} repo(s) with protection drift/absence out of {d['scanned']} scanned ({d['declared_specs']} declare a spec).\")
+          sys.exit(1 if hard else 0)
+          "
+
+      - name: Reconcile -- apply each committed spec to live protection (deliberate, WRITE)
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.reconcile == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          REPOS: ${{ github.event.inputs.repos }}
+        run: |
+          set -euo pipefail
+          if [ -n "$REPOS" ]; then
+            mapfile -t repos < <(echo "$REPOS" | tr ',' '\n')
+          else
+            mapfile -t repos < <(gh repo list SocioProphet --limit 500 --json name,isFork,isArchived \
+              --jq '.[] | select(.isFork==false and .isArchived==false) | .name')
+          fi
+          for r in "${repos[@]}"; do
+            slug="SocioProphet/$r"
+            ref=$(gh repo view "$slug" --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null || true)
+            [ -z "$ref" ] && continue
+            if gh api "repos/$slug/contents/.github/branch-protection.main.json?ref=$ref" \
+                 --jq '.content' 2>/dev/null | base64 -d > /tmp/spec.json; then
+              echo "reconciling $slug ($ref) from committed spec"
+              gh api -X PUT "repos/$slug/branches/$ref/protection" --input /tmp/spec.json >/dev/null \
+                && echo "  applied" || echo "  FAILED (token needs administration:write?)"
+            fi
+          done

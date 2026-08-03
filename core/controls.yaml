@@ -15,7 +15,7 @@
 # is a checkable condition (scripts/check_registry_staleness.py), not a
 # silent drift.
 
-version: "1.2.0"
+version: "1.3.0"
 
 controls:
   - id: naming-canonical-bare-name
@@ -234,3 +234,35 @@ controls:
       A scanner for this control must emit the finding's location, not the
       secret reference it matched.
     incident: 2026-08-02-silent-ci-failures
+
+  - id: main-branch-protection-enforced
+    title: A repo's declared branch protection must be committed as IaC and match live state
+    applies_to: first-party repos that commit .github/branch-protection.main.json
+    check: >
+      Branch protection is estate security posture (required checks, whether
+      admins can bypass, force-push/deletion, linear history) and must be a
+      committed source of truth, not imperative live-only state set by a hand-run
+      `gh api PUT`. For each repo that DECLARES protection in
+      `.github/branch-protection.main.json`, the repo's live default-branch
+      protection must MATCH that spec, field for field (required_status_checks
+      strict+contexts, enforce_admins, required_linear_history,
+      allow_force_pushes, allow_deletions, required_conversation_resolution,
+      required reviews). Live protection that is ABSENT (spec not enforced -- an
+      advisory gate) or DRIFTS from the spec is a hard finding. Scoped to opt-in
+      by design (like github-ci-health-current): a repo with no committed spec is
+      a soft note at most, never nagged, so the check stays precise. Reconcile is
+      a deliberate action (workflow_dispatch), never a blind scheduled
+      auto-mutation of live security state. The org is not on GitHub Team, so
+      classic protection is codified for now; migrate to a repo/org ruleset if
+      the tier changes. Executable: scripts/estate_branch_protection_audit.py
+      (App token, administration:read to verify live; contents:read to read the
+      spec -- unreadable live protection degrades to a soft note, never a false
+      finding), workflow .github/workflows/estate-branch-protection.yml.
+    severity: high
+    remediation: >
+      Commit the intended protection as `.github/branch-protection.main.json`;
+      re-assert it from that artifact (the estate-branch-protection workflow's
+      reconcile dispatch, or `gh api -X PUT .../branches/main/protection --input`
+      that file). Never leave protection weaker than the committed spec -- that
+      is itself the drift this control detects.
+    incident: 2026-08-03-advisory-ci-unprotected-main
