@@ -29,6 +29,7 @@ on:
 permissions:
   contents: read
   id-token: write   # WIF: mint a short-lived GCP token in-workflow; no static key.
+  issues: write     # scheduled runs surface sovereign-governance drift as a tracking issue
 
 jobs:
   audit:
@@ -87,3 +88,33 @@ jobs:
           print(f\"\n{len(hard)} hard sovereign-governance finding(s).\")
           sys.exit(1 if hard else 0)
           "
+
+      # SELF-HEALING visibility: on the scheduled run, surface sovereign-governance drift as ONE
+      # tracking issue (open/update on hard findings, auto-close when clean). Detection + tracking-
+      # state recovery only -- each substrate's live reconcile stays its own gated path.
+      - name: Surface sovereign-governance drift as a tracking issue (scheduled)
+        if: ${{ always() && github.event_name == 'schedule' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "Estate sovereign-governance drift"
+        run: |
+          python3 -c "
+          import json,os
+          d=json.load(open('/tmp/sov.json'))
+          hard=[f for f in d['findings'] if f['severity']=='high']
+          url=os.environ['GITHUB_SERVER_URL']+'/'+os.environ['GITHUB_REPOSITORY']+'/actions/runs/'+os.environ['GITHUB_RUN_ID']
+          lines=[str(len(hard))+' hard sovereign-governance finding(s) ('+url+').','']
+          lines+=['- ['+f['substrate']+'] '+f['detail'] for f in hard]
+          lines+=['','Each substrate reconciles through its own gated path (ArgoCD for zot, deploy-gitea-authority behind ADR-0006 for Gitea, the agora deploy). Auto-closes when the next scheduled audit is clean.']
+          open('/tmp/issue-body.md','w').write(chr(10).join(lines))
+          open('/tmp/hard_count','w').write(str(len(hard)))
+          "
+          hard=$(cat /tmp/hard_count)
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty')
+          if [ "$hard" -gt 0 ]; then
+            if [ -n "$existing" ]; then gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file /tmp/issue-body.md;
+            else gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file /tmp/issue-body.md; fi
+          elif [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "Clean again -- auto-closing."
+            gh issue close "$existing" --repo "$GITHUB_REPOSITORY"
+          fi
