@@ -45,20 +45,21 @@ on:
 
 permissions:
   contents: read
+  issues: write   # scheduled runs surface drift as a tracking issue (auto-opened / auto-closed)
 
 jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.3.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
         with:
           python-version: "3.12"
 
       - name: Mint an org-scoped token (skipped if secrets aren't configured yet)
         id: app-token
         if: ${{ vars.GH_OPS_APP_CONFIGURED == 'true' }}
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547  # v1
         with:
           app-id: ${{ secrets.GH_OPS_APP_ID }}
           private-key: ${{ secrets.GH_OPS_APP_PRIVATE_KEY }}
@@ -84,6 +85,37 @@ jobs:
           print(f\"\n{len(hard)} repo(s) with protection drift/absence out of {d['scanned']} scanned ({d['declared_specs']} declare a spec).\")
           sys.exit(1 if hard else 0)
           "
+
+      # SELF-HEALING visibility: on the scheduled plumb-line, surface drift as ONE tracking issue
+      # (open/update on hard findings, auto-close when clean). Detection + notification + tracking-
+      # state recovery -- never a blind auto-mutation of live protection (that stays the deliberate
+      # reconcile dispatch below). Only on schedule: a manual dispatch means someone is already watching.
+      - name: Surface drift as a tracking issue (scheduled)
+        if: ${{ always() && github.event_name == 'schedule' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "Estate branch-protection drift"
+        run: |
+          python3 -c "
+          import json,os
+          d=json.load(open('/tmp/bp.json'))
+          hard=[f for f in d['findings'] if f['severity']=='high']
+          url=os.environ['GITHUB_SERVER_URL']+'/'+os.environ['GITHUB_REPOSITORY']+'/actions/runs/'+os.environ['GITHUB_RUN_ID']
+          lines=[str(len(hard))+' repo(s) with branch-protection drift/absence ('+url+').','']
+          lines+=['- '+f['repo']+': '+f['detail'] for f in hard]
+          lines+=['','Reconcile: run this workflow via workflow_dispatch with reconcile=true, or re-apply each repo .github/branch-protection.main.json. Auto-closes when the next scheduled audit is clean.']
+          open('/tmp/issue-body.md','w').write(chr(10).join(lines))
+          open('/tmp/hard_count','w').write(str(len(hard)))
+          "
+          hard=$(cat /tmp/hard_count)
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty')
+          if [ "$hard" -gt 0 ]; then
+            if [ -n "$existing" ]; then gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body-file /tmp/issue-body.md;
+            else gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file /tmp/issue-body.md; fi
+          elif [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "Clean again -- auto-closing."
+            gh issue close "$existing" --repo "$GITHUB_REPOSITORY"
+          fi
 
       - name: Reconcile -- apply each committed spec to live protection (deliberate, WRITE)
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.reconcile == 'true' }}
