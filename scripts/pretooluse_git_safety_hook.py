@@ -2,6 +2,10 @@
 """PreToolUse hook enforcing capture-before-delete-verified (git-ops-standards
 core/controls.yaml) on risky Bash calls.
 
+It also blocks a plain `git push` when the target repo is mid-rebase, mid-merge,
+or has unresolved conflicts in the index -- so a mis-read rebase exit code can
+never publish a half-finished rebase (state-based, fails open).
+
 Reads the Claude Code hook input JSON on stdin. If tool_input.command matches
 a risky pattern (rm -rf, git worktree remove, git push --force, git branch
 -D), extracts the target repo/branch and verifies it against the same bar as
@@ -154,6 +158,37 @@ def extract_targets(cmd: str) -> list[tuple[str, str | None]]:
     return targets
 
 
+def push_target_repo(cmd: str) -> str:
+    """Best-effort target repo dir for a `git push` in cmd:
+    `git -C <dir> push`, else a leading `cd <dir>`, else the current dir."""
+    m = re.search(r"git\s+-C\s+(\S+)\s+push\b", cmd)
+    if m:
+        return os.path.expanduser(m.group(1).strip("\"'"))
+    m = re.search(r"\bcd\s+(\"[^\"]+\"|'[^']+'|[^\s;&|]+)", cmd)
+    if m:
+        return os.path.expanduser(m.group(1).strip("\"'"))
+    return "."
+
+
+def rebase_or_conflict_reason(repo: str) -> str | None:
+    """Reason string if `repo` is mid-rebase/merge or has unresolved conflicts,
+    else None. Uses git state (not text scanning), so no false positives on docs
+    that merely mention conflict markers. Fails open: a non-repo returns None."""
+    rc, gitdir = sh(["git", "-C", repo, "rev-parse", "--git-dir"])
+    if rc != 0:
+        return None
+    gd = gitdir if os.path.isabs(gitdir) else os.path.join(repo, gitdir)
+    if os.path.isdir(os.path.join(gd, "rebase-merge")) or os.path.isdir(os.path.join(gd, "rebase-apply")):
+        return "a rebase is in progress"
+    if os.path.isfile(os.path.join(gd, "MERGE_HEAD")):
+        return "a merge is in progress"
+    rc, unmerged = sh(["git", "-C", repo, "ls-files", "-u"])
+    if rc == 0 and unmerged.strip():
+        n = len({ln.split("\t")[-1] for ln in unmerged.splitlines() if ln})
+        return f"{n} unresolved/conflicted file(s) in the index"
+    return None
+
+
 def main() -> None:
     try:
         payload = json.load(sys.stdin)
@@ -169,6 +204,19 @@ def main() -> None:
     if not cmd:
         allow()
         return
+
+    # Guard: never push a half-finished rebase/merge or a conflicted tree.
+    # (Retrospective fix: an agent script mis-read a rebase exit code and pushed
+    # a mid-rebase branch with an unresolved conflict. State-based, fails open.)
+    if re.search(r"git\s+(?:-C\s+\S+\s+)?push\b", cmd):
+        repo = push_target_repo(cmd)
+        why = rebase_or_conflict_reason(repo)
+        if why:
+            deny(
+                f"git push blocked: {why} in {repo}. Finish or abort the "
+                "rebase/merge and resolve all conflicts before pushing."
+            )
+            return
 
     targets = extract_targets(cmd)
     if not targets:
